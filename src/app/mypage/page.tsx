@@ -1,0 +1,180 @@
+import { createClient } from "@/lib/supabase/server";
+import { isAdminConfigured } from "@/lib/supabase/admin";
+import { changePassword, deleteAccount, updateProfile } from "./actions";
+import type { Profile } from "@/types/item";
+import styles from "./page.module.css";
+
+export const dynamic = "force-dynamic";
+
+const ERROR_MESSAGES: Record<string, string> = {
+  "username-required": "ユーザー名を入力してください。",
+  "password-too-short": "新しいパスワードは 6 文字以上で入力してください。",
+  "password-mismatch": "新しいパスワードと確認用パスワードが一致しません。",
+  "current-password-wrong": "現在のパスワードが正しくありません。",
+  "password-wrong": "パスワードが正しくありません。",
+  "confirmation-mismatch": "確認テキストが一致しません。「削除」と正確に入力してください。",
+  "admin-not-configured": "アカウント削除は管理者環境変数（SUPABASE_SERVICE_ROLE_KEY）が必要です。",
+  "email-missing": "メールアドレスが取得できません。",
+};
+
+const SUCCESS_MESSAGES: Record<string, string> = {
+  "profile-updated": "プロフィールを更新しました。",
+  "password-updated": "パスワードを変更しました。",
+};
+
+function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${yyyy}/${mm}/${dd} ${hh}:${mi}`;
+}
+
+export default async function MyPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string; ok?: string }>;
+}) {
+  const { error, ok } = await searchParams;
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return null; // middleware redirects, defensive guard
+
+  const { data: profileData } = await supabase
+    .from("profiles")
+    .select("*")
+    .eq("user_id", user.id)
+    .maybeSingle();
+  const profile = (profileData as Profile | null) ?? null;
+  const adminConfigured = isAdminConfigured();
+
+  const errorMsg = error ? ERROR_MESSAGES[error] ?? decodeURIComponent(error) : null;
+  const okMsg = ok ? SUCCESS_MESSAGES[ok] ?? decodeURIComponent(ok) : null;
+
+  return (
+    <div className={styles.container}>
+      <h1 className={styles.title}>マイページ</h1>
+
+      {errorMsg ? <p className={styles.error}>{errorMsg}</p> : null}
+      {okMsg ? <p className={styles.success}>{okMsg}</p> : null}
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>アカウント情報</h2>
+        <dl className={styles.grid2}>
+          <dt className={styles.gridLabel}>ユーザー ID</dt>
+          <dd className={styles.readonly}>{user.id}</dd>
+          <dt className={styles.gridLabel}>メール</dt>
+          <dd className={styles.readonly}>{user.email}</dd>
+          <dt className={styles.gridLabel}>登録日時</dt>
+          <dd className={styles.readonly}>{formatDateTime(user.created_at)}</dd>
+          <dt className={styles.gridLabel}>最終ログイン</dt>
+          <dd className={styles.readonly}>{formatDateTime(user.last_sign_in_at)}</dd>
+        </dl>
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>プロフィール編集</h2>
+        <form action={updateProfile}>
+          <label className={styles.field}>
+            <span className={styles.fieldLabel}>ユーザー名</span>
+            <input
+              name="username"
+              required
+              defaultValue={profile?.username ?? ""}
+              className={styles.input}
+            />
+          </label>
+          <button type="submit" className={styles.submit} style={{ marginTop: "0.75rem" }}>
+            保存
+          </button>
+        </form>
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>パスワード変更</h2>
+        <form action={changePassword}>
+          <label className={styles.field}>
+            <span className={styles.fieldLabel}>現在のパスワード</span>
+            <input
+              name="current_password"
+              type="password"
+              required
+              autoComplete="current-password"
+              className={styles.input}
+            />
+          </label>
+          <label className={styles.field} style={{ marginTop: "0.5rem" }}>
+            <span className={styles.fieldLabel}>新しいパスワード（6 文字以上）</span>
+            <input
+              name="new_password"
+              type="password"
+              required
+              minLength={6}
+              autoComplete="new-password"
+              className={styles.input}
+            />
+          </label>
+          <label className={styles.field} style={{ marginTop: "0.5rem" }}>
+            <span className={styles.fieldLabel}>新しいパスワード（確認）</span>
+            <input
+              name="confirm_password"
+              type="password"
+              required
+              minLength={6}
+              autoComplete="new-password"
+              className={styles.input}
+            />
+          </label>
+          <button type="submit" className={styles.submit} style={{ marginTop: "0.75rem" }}>
+            パスワードを変更
+          </button>
+        </form>
+      </section>
+
+      <section className={`${styles.section} ${styles.danger}`}>
+        <h2 className={`${styles.sectionTitle} ${styles.dangerTitle}`}>アカウント削除</h2>
+        <p className={styles.note}>
+          アカウントを削除すると、登録済みのアイテム・購入予定・出品情報・カテゴリがすべて消えます。元に戻すことはできません。
+        </p>
+        {!adminConfigured ? (
+          <p className={styles.note}>
+            アカウント削除を有効化するには、サーバー環境変数{" "}
+            <code>SUPABASE_SERVICE_ROLE_KEY</code> を設定してください。
+          </p>
+        ) : null}
+        <form action={deleteAccount}>
+          <label className={styles.field}>
+            <span className={styles.fieldLabel}>パスワード（本人確認）</span>
+            <input
+              name="password"
+              type="password"
+              required
+              autoComplete="current-password"
+              className={styles.input}
+            />
+          </label>
+          <label className={styles.field} style={{ marginTop: "0.5rem" }}>
+            <span className={styles.fieldLabel}>
+              削除する場合は「削除」と入力してください
+            </span>
+            <input name="confirmation" required className={styles.input} />
+          </label>
+          <button
+            type="submit"
+            className={styles.submit}
+            disabled={!adminConfigured}
+            style={{ marginTop: "0.75rem" }}
+          >
+            アカウントを削除
+          </button>
+        </form>
+      </section>
+    </div>
+  );
+}
