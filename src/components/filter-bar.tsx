@@ -1,16 +1,19 @@
 "use client";
 
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTransition } from "react";
 import type { Category } from "@/types/item";
 import styles from "./filter-bar.module.css";
 
 type Props = {
   categories: Pick<Category, "id" | "name" | "color">[];
+  // Search placeholder differs per list; let callers override.
+  placeholder?: string;
 };
 
-export default function FilterBar({ categories }: Props) {
+export default function FilterBar({ categories, placeholder = "名前・メモで検索" }: Props) {
   const router = useRouter();
+  const pathname = usePathname();
   const params = useSearchParams();
   const [pending, startTransition] = useTransition();
 
@@ -25,7 +28,7 @@ export default function FilterBar({ categories }: Props) {
     }
     const qs = sp.toString();
     startTransition(() => {
-      router.replace(qs ? `/?${qs}` : "/");
+      router.replace(qs ? `${pathname}?${qs}` : pathname);
     });
   }
 
@@ -33,7 +36,7 @@ export default function FilterBar({ categories }: Props) {
     <div className={styles.bar}>
       <input
         type="search"
-        placeholder="名前・メモ・タグで検索"
+        placeholder={placeholder}
         defaultValue={currentQ}
         onChange={(e) => update({ q: e.target.value })}
         className={styles.search}
@@ -46,7 +49,7 @@ export default function FilterBar({ categories }: Props) {
         <option value="">全カテゴリ</option>
         <option value="__none__">未分類</option>
         {categories.map((c) => (
-          <option key={c.id} value={c.id}>
+          <option key={c.id} value={String(c.id)}>
             {c.name}
           </option>
         ))}

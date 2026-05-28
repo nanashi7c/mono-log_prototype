@@ -80,6 +80,40 @@
   color: var(--slate-500);
 }
 
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 9999px;
+  padding: 0.125rem 0.5rem;
+  font-weight: 500;
+}
+
+.statusOwned {
+  background-color: var(--emerald-50);
+  color: var(--emerald-700);
+}
+
+.statusListed {
+  background-color: #fef3c7;
+  color: #92400e;
+}
+
+.statusPlanned {
+  background-color: var(--brand-100);
+  color: var(--brand-700);
+}
+
+.statusSold {
+  background-color: var(--slate-100);
+  color: var(--slate-600);
+}
+
+.categories {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
 .category {
   display: inline-flex;
   align-items: center;
@@ -100,10 +134,4 @@
   border-radius: 9999px;
   background-color: var(--slate-100);
   padding: 0.125rem 0.5rem;
-}
-
-.tags {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
