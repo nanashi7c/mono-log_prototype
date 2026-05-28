@@ -1,8 +1,12 @@
 const jpy = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", maximumFractionDigits: 0 });
 
-export function formatYen(value: number | null | undefined): string {
+// Postgres `numeric` columns come back from supabase-js as strings to preserve precision;
+// `integer` columns come back as JS numbers. Accept both for ergonomics.
+export function formatYen(value: number | string | null | undefined): string {
   if (value == null) return "—";
-  return jpy.format(value);
+  const n = typeof value === "string" ? Number(value) : value;
+  if (!Number.isFinite(n)) return "—";
+  return jpy.format(n);
 }
 
 export function formatDate(value: string | null | undefined): string {
