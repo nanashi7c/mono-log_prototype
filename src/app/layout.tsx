@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import NavBar from "@/components/nav-bar";
 import "./globals.css";
+import styles from "./layout.module.css";
 
 export const metadata: Metadata = {
   title: "mono-log",
@@ -22,7 +23,7 @@ export default async function RootLayout({
     <html lang="ja">
       <body>
         <NavBar email={user?.email ?? null} />
-        <main className="mx-auto max-w-5xl px-4 py-6">{children}</main>
+        <main className={styles.main}>{children}</main>
       </body>
     </html>
   );

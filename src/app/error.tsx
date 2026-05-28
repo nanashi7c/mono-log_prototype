@@ -1,5 +1,7 @@
 "use client";
 
+import styles from "./error.module.css";
+
 export default function ErrorBoundary({
   error,
   reset,
@@ -8,14 +10,10 @@ export default function ErrorBoundary({
   reset: () => void;
 }) {
   return (
-    <div className="rounded-md bg-rose-50 p-4 text-sm text-rose-700">
-      <p className="font-medium">エラーが発生しました</p>
-      <p className="mt-1 text-rose-600">{error.message}</p>
-      <button
-        type="button"
-        onClick={reset}
-        className="mt-3 rounded-md border border-rose-300 px-3 py-1 text-rose-700 hover:bg-rose-100"
-      >
+    <div className={styles.container}>
+      <p className={styles.title}>エラーが発生しました</p>
+      <p className={styles.message}>{error.message}</p>
+      <button type="button" onClick={reset} className={styles.retry}>
         再試行
       </button>
     </div>

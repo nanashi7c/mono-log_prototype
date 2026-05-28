@@ -2,6 +2,7 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { formatYen } from "@/lib/format";
 import type { ItemWithCategory } from "@/types/item";
+import styles from "./page.module.css";
 
 export const dynamic = "force-dynamic";
 
@@ -20,7 +21,7 @@ export default async function DashboardPage() {
     .select("id, price_yen, category:categories(id, name, color)");
 
   if (error) {
-    return <p className="rounded-md bg-rose-50 p-3 text-sm text-rose-700">{error.message}</p>;
+    return <p className={styles.error}>{error.message}</p>;
   }
 
   const items = (data ?? []) as Pick<ItemWithCategory, "id" | "price_yen" | "category">[];
@@ -50,41 +51,39 @@ export default async function DashboardPage() {
   const maxTotal = Math.max(1, ...stats.map((s) => s.total));
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-end justify-between">
-        <h1 className="text-2xl font-semibold">ダッシュボード</h1>
-        <div className="flex gap-3 text-sm">
-          <a href="/api/export" className="text-brand-600 hover:underline">
+    <div className={styles.container}>
+      <div className={styles.header}>
+        <h1 className={styles.title}>ダッシュボード</h1>
+        <div className={styles.actions}>
+          <a href="/api/export" className={styles.actionLink}>
             エクスポート
           </a>
-          <Link href="/import" className="text-brand-600 hover:underline">
+          <Link href="/import" className={styles.actionLink}>
             インポート
           </Link>
         </div>
       </div>
 
-      <section className="grid gap-3 sm:grid-cols-3">
+      <section className={styles.stats}>
         <Stat label="登録数" value={`${totalCount} 件`} />
         <Stat label="保有資産（合計）" value={formatYen(totalYen)} />
         <Stat label="価格あり平均" value={priced ? formatYen(avgYen) : "—"} />
       </section>
 
       <section>
-        <h2 className="mb-2 text-sm font-medium text-slate-500">カテゴリ別</h2>
+        <h2 className={styles.sectionTitle}>カテゴリ別</h2>
         {stats.length === 0 ? (
-          <p className="rounded-md border border-dashed border-slate-300 bg-white p-6 text-center text-sm text-slate-500">
-            データがありません。
-          </p>
+          <p className={styles.empty}>データがありません。</p>
         ) : (
-          <ul className="space-y-1.5 rounded-lg border border-slate-200 bg-white p-3">
+          <ul className={styles.list}>
             {stats.map((s) => (
-              <li key={s.id ?? "__none__"} className="flex items-center gap-3 text-sm">
-                <span className="w-32 truncate" style={{ color: s.color }}>
+              <li key={s.id ?? "__none__"} className={styles.row}>
+                <span className={styles.rowName} style={{ color: s.color }}>
                   ● {s.name}
                 </span>
-                <div className="flex-1">
+                <div className={styles.bar}>
                   <div
-                    className="h-2 rounded-full"
+                    className={styles.barFill}
                     style={{
                       width: `${(s.total / maxTotal) * 100}%`,
                       background: s.color,
@@ -92,8 +91,8 @@ export default async function DashboardPage() {
                     }}
                   />
                 </div>
-                <span className="w-20 text-right tabular-nums text-slate-500">{s.count} 件</span>
-                <span className="w-28 text-right tabular-nums">{formatYen(s.total)}</span>
+                <span className={styles.count}>{s.count} 件</span>
+                <span className={styles.total}>{formatYen(s.total)}</span>
               </li>
             ))}
           </ul>
@@ -105,9 +104,9 @@ export default async function DashboardPage() {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4">
-      <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
+    <div className={styles.stat}>
+      <div className={styles.statLabel}>{label}</div>
+      <div className={styles.statValue}>{value}</div>
     </div>
   );
 }

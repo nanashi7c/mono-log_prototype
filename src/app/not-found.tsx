@@ -1,11 +1,12 @@
 import Link from "next/link";
+import styles from "./not-found.module.css";
 
 export default function NotFound() {
   return (
-    <div className="py-16 text-center">
-      <p className="text-2xl font-semibold">404</p>
-      <p className="mt-2 text-slate-600">ページが見つかりません。</p>
-      <Link href="/" className="mt-4 inline-block text-brand-600 hover:underline">
+    <div className={styles.container}>
+      <p className={styles.code}>404</p>
+      <p className={styles.message}>ページが見つかりません。</p>
+      <Link href="/" className={styles.link}>
         ホームへ
       </Link>
     </div>

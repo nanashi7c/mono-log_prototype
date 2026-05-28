@@ -4,6 +4,7 @@ import { signedImageUrl } from "@/lib/image";
 import ItemCard from "@/components/item-card";
 import FilterBar from "@/components/filter-bar";
 import type { Category, ItemWithCategory } from "@/types/item";
+import styles from "./page.module.css";
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +45,7 @@ export default async function HomePage({
 
   if (error) {
     return (
-      <p className="rounded-md bg-rose-50 p-3 text-sm text-rose-700">
+      <p className={styles.error}>
         読み込みに失敗しました: {error.message}
       </p>
     );
@@ -54,16 +55,13 @@ export default async function HomePage({
   const signedUrls = await Promise.all(list.map((i) => signedImageUrl(i.image_path)));
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-end justify-between gap-3">
+    <div className={styles.container}>
+      <div className={styles.header}>
         <div>
-          <h1 className="text-2xl font-semibold">所有物</h1>
-          <p className="text-sm text-slate-500">{list.length} 件</p>
+          <h1 className={styles.title}>所有物</h1>
+          <p className={styles.count}>{list.length} 件</p>
         </div>
-        <Link
-          href="/items/new"
-          className="rounded-md bg-brand-500 px-3 py-1.5 text-sm text-white hover:bg-brand-600"
-        >
+        <Link href="/items/new" className={styles.cta}>
           + 追加
         </Link>
       </div>
@@ -71,11 +69,14 @@ export default async function HomePage({
       <FilterBar categories={(categories ?? []) as Pick<Category, "id" | "name" | "color">[]} />
 
       {list.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">
-          まだアイテムがありません。<Link href="/items/new" className="text-brand-600 hover:underline">最初の1件を追加</Link>
+        <div className={styles.empty}>
+          まだアイテムがありません。
+          <Link href="/items/new" className={styles.emptyLink}>
+            最初の1件を追加
+          </Link>
         </div>
       ) : (
-        <ul className="grid gap-3 sm:grid-cols-2">
+        <ul className={styles.grid}>
           {list.map((item, i) => (
             <li key={item.id}>
               <ItemCard item={item} imageUrl={signedUrls[i]} />

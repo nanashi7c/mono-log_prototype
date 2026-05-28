@@ -1,17 +1,81 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
 :root {
   color-scheme: light;
+
+  --brand-50: #f5f7fb;
+  --brand-100: #e7ecf5;
+  --brand-500: #4a6cf7;
+  --brand-600: #3854d3;
+  --brand-700: #2b41a8;
+
+  --slate-50: #f8fafc;
+  --slate-100: #f1f5f9;
+  --slate-200: #e2e8f0;
+  --slate-300: #cbd5e1;
+  --slate-400: #94a3b8;
+  --slate-500: #64748b;
+  --slate-600: #475569;
+  --slate-700: #334155;
+  --slate-900: #0f172a;
+
+  --rose-50: #fff1f2;
+  --rose-100: #ffe4e6;
+  --rose-300: #fda4af;
+  --rose-600: #e11d48;
+  --rose-700: #be123c;
+
+  --emerald-50: #ecfdf5;
+  --emerald-700: #047857;
+
+  --white: #ffffff;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 html,
 body {
-  @apply bg-slate-50 text-slate-900 antialiased;
+  margin: 0;
+  padding: 0;
+  background-color: var(--slate-50);
+  color: var(--slate-900);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
 }
 
 button,
 [role="button"] {
-  @apply select-none;
+  user-select: none;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
 }

@@ -1,0 +1,25 @@
+.container {
+  padding-block: 4rem;
+  text-align: center;
+}
+
+.code {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.message {
+  margin-top: 0.5rem;
+  color: var(--slate-600);
+}
+
+.link {
+  margin-top: 1rem;
+  display: inline-block;
+  color: var(--brand-600);
+}
+
+.link:hover {
+  text-decoration: underline;
+}

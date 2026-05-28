@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { login } from "./actions";
+import styles from "./page.module.css";
 
 export default async function LoginPage({
   searchParams,
@@ -9,41 +10,38 @@ export default async function LoginPage({
   const { error, redirect } = await searchParams;
 
   return (
-    <div className="mx-auto max-w-sm pt-8">
-      <h1 className="mb-6 text-2xl font-semibold">ログイン</h1>
-      <form action={login} className="space-y-4">
+    <div className={styles.container}>
+      <h1 className={styles.title}>ログイン</h1>
+      <form action={login} className={styles.form}>
         {redirect ? <input type="hidden" name="redirect" value={redirect} /> : null}
-        <label className="block">
-          <span className="mb-1 block text-sm text-slate-600">メール</span>
+        <label className={styles.field}>
+          <span className={styles.fieldLabel}>メール</span>
           <input
             name="email"
             type="email"
             required
             autoComplete="email"
-            className="w-full rounded-md border border-slate-300 px-3 py-2"
+            className={styles.input}
           />
         </label>
-        <label className="block">
-          <span className="mb-1 block text-sm text-slate-600">パスワード</span>
+        <label className={styles.field}>
+          <span className={styles.fieldLabel}>パスワード</span>
           <input
             name="password"
             type="password"
             required
             autoComplete="current-password"
-            className="w-full rounded-md border border-slate-300 px-3 py-2"
+            className={styles.input}
           />
         </label>
-        {error ? <p className="text-sm text-rose-600">{decodeURIComponent(error)}</p> : null}
-        <button
-          type="submit"
-          className="w-full rounded-md bg-brand-500 px-3 py-2 text-white hover:bg-brand-600"
-        >
+        {error ? <p className={styles.error}>{decodeURIComponent(error)}</p> : null}
+        <button type="submit" className={styles.submit}>
           ログイン
         </button>
       </form>
-      <p className="mt-4 text-center text-sm text-slate-500">
+      <p className={styles.footer}>
         アカウントをお持ちでない方は{" "}
-        <Link href="/signup" className="text-brand-600 hover:underline">
+        <Link href="/signup" className={styles.footerLink}>
           新規登録
         </Link>
       </p>

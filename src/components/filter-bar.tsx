@@ -3,6 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTransition } from "react";
 import type { Category } from "@/types/item";
+import styles from "./filter-bar.module.css";
 
 type Props = {
   categories: Pick<Category, "id" | "name" | "color">[];
@@ -29,18 +30,18 @@ export default function FilterBar({ categories }: Props) {
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className={styles.bar}>
       <input
         type="search"
         placeholder="名前・メモ・タグで検索"
         defaultValue={currentQ}
         onChange={(e) => update({ q: e.target.value })}
-        className="min-w-0 flex-1 rounded-md border border-slate-300 px-3 py-1.5 text-sm"
+        className={styles.search}
       />
       <select
         value={currentCategory}
         onChange={(e) => update({ category: e.target.value || null })}
-        className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm"
+        className={styles.select}
       >
         <option value="">全カテゴリ</option>
         <option value="__none__">未分類</option>
@@ -50,7 +51,7 @@ export default function FilterBar({ categories }: Props) {
           </option>
         ))}
       </select>
-      {pending ? <span className="text-xs text-slate-400">更新中…</span> : null}
+      {pending ? <span className={styles.pending}>更新中…</span> : null}
     </div>
   );
 }
