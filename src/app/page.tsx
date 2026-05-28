@@ -1,89 +1,136 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
-import { signedImageUrl } from "@/lib/image";
-import ItemCard from "@/components/item-card";
-import FilterBar from "@/components/filter-bar";
-import type { Category, ItemWithCategory } from "@/types/item";
 import styles from "./page.module.css";
 
 export const dynamic = "force-dynamic";
 
-type Search = { q?: string; category?: string };
-
-export default async function HomePage({
-  searchParams,
-}: {
-  searchParams: Promise<Search>;
-}) {
-  const { q, category } = await searchParams;
+export default async function LandingPage() {
   const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
-  const { data: categories } = await supabase
-    .from("categories")
-    .select("id, name, color")
-    .order("name", { ascending: true });
+  if (!user) return <UnauthenticatedLanding />;
 
-  let query = supabase
-    .from("items")
-    .select("*, category:categories(id, name, color)")
-    .order("created_at", { ascending: false });
+  // Counts for the four navigation cards.
+  const [owned, planned, listed] = await Promise.all([
+    supabase
+      .from("items")
+      .select("id", { count: "exact", head: true })
+      .in("status", ["owned", "listed"])
+      .is("deleted_at", null),
+    supabase
+      .from("items")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "planned")
+      .is("deleted_at", null),
+    supabase
+      .from("items")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "listed")
+      .is("deleted_at", null),
+  ]);
 
-  if (category === "__none__") {
-    query = query.is("category_id", null);
-  } else if (category) {
-    query = query.eq("category_id", category);
-  }
-
-  if (q && q.trim()) {
-    const term = q.trim();
-    // Search name/notes via ilike, and tags via array containment.
-    const like = `%${term.replace(/[%_]/g, (m) => `\\${m}`)}%`;
-    query = query.or(`name.ilike.${like},notes.ilike.${like},tags.cs.{${term}}`);
-  }
-
-  const { data: items, error } = await query;
-
-  if (error) {
-    return (
-      <p className={styles.error}>
-        読み込みに失敗しました: {error.message}
-      </p>
-    );
-  }
-
-  const list = (items ?? []) as ItemWithCategory[];
-  const signedUrls = await Promise.all(list.map((i) => signedImageUrl(i.image_path)));
+  const username = user.email?.split("@")[0] ?? "";
 
   return (
-    <div className={styles.container}>
-      <div className={styles.header}>
+    <div>
+      <div className={styles.welcomeRow}>
         <div>
-          <h1 className={styles.title}>所有物</h1>
-          <p className={styles.count}>{list.length} 件</p>
+          <h1 className={styles.welcomeTitle}>こんにちは、{username} さん</h1>
+          <p className={styles.welcomeSub}>管理したい所有物を選んでください。</p>
         </div>
-        <Link href="/items/new" className={styles.cta}>
-          + 追加
-        </Link>
       </div>
 
-      <FilterBar categories={(categories ?? []) as Pick<Category, "id" | "name" | "color">[]} />
+      <div className={styles.cards}>
+        <NavCard
+          href="/items"
+          label="OWNED"
+          title="所有物"
+          count={owned.count ?? 0}
+          desc="手元にある物・出品中の物を一覧表示"
+        />
+        <NavCard
+          href="/items/planned"
+          label="PLANNED"
+          title="購入予定"
+          count={planned.count ?? 0}
+          desc="買おうとしている物を管理"
+        />
+        <NavCard
+          href="/items/selling"
+          label="LISTED"
+          title="出品中"
+          count={listed.count ?? 0}
+          desc="出品中の物と損益を確認"
+        />
+        <NavCard href="/dashboard" label="STATS" title="ダッシュボード" desc="保有資産・カテゴリ別の集計" />
+      </div>
+    </div>
+  );
+}
 
-      {list.length === 0 ? (
-        <div className={styles.empty}>
-          まだアイテムがありません。
-          <Link href="/items/new" className={styles.emptyLink}>
-            最初の1件を追加
+function NavCard({
+  href,
+  label,
+  title,
+  count,
+  desc,
+}: {
+  href: string;
+  label: string;
+  title: string;
+  count?: number;
+  desc: string;
+}) {
+  return (
+    <Link href={href} className={styles.card}>
+      <span className={styles.cardLabel}>{label}</span>
+      <h2 className={styles.cardTitle}>{title}</h2>
+      {count != null ? <span className={styles.cardCount}>{count}</span> : null}
+      <p className={styles.cardDesc}>{desc}</p>
+    </Link>
+  );
+}
+
+function UnauthenticatedLanding() {
+  return (
+    <div>
+      <section className={styles.hero}>
+        <h1 className={styles.tagline}>所有物・購入予定・出品をひとつに。</h1>
+        <p className={styles.sub}>
+          バラバラに管理していた「持ち物・欲しい物・売りたい物」を mono-log で一元管理しましょう。
+        </p>
+        <div className={styles.heroActions}>
+          <Link href="/signup" className={styles.primary}>
+            無料で始める
+          </Link>
+          <Link href="/login" className={styles.secondary}>
+            ログイン
           </Link>
         </div>
-      ) : (
-        <ul className={styles.grid}>
-          {list.map((item, i) => (
-            <li key={item.id}>
-              <ItemCard item={item} imageUrl={signedUrls[i]} />
-            </li>
-          ))}
-        </ul>
-      )}
+      </section>
+
+      <section className={styles.features}>
+        <article className={styles.feature}>
+          <h2 className={styles.featureTitle}>所有物リスト</h2>
+          <p className={styles.featureDesc}>
+            手元にある物を画像・カテゴリ・購入価格とともに記録。検索でいつでも探せます。
+          </p>
+        </article>
+        <article className={styles.feature}>
+          <h2 className={styles.featureTitle}>購入予定リスト</h2>
+          <p className={styles.featureDesc}>
+            買う前から記録して、購入予定年月や定価、商品リンクを管理。買ったらワンクリックで所有物へ。
+          </p>
+        </article>
+        <article className={styles.feature}>
+          <h2 className={styles.featureTitle}>出品リスト</h2>
+          <p className={styles.featureDesc}>
+            販売手数料・送料・作業時間を含めた損益を自動計算し、出品すべきかを判定します。
+          </p>
+        </article>
+      </section>
     </div>
   );
 }

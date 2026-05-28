@@ -20,7 +20,7 @@ export default async function RootLayout({
   } = await supabase.auth.getUser();
 
   return (
-    <html lang="ja">
+    <html lang="ja" suppressHydrationWarning>
       <body>
         <NavBar email={user?.email ?? null} />
         <main className={styles.main}>{children}</main>

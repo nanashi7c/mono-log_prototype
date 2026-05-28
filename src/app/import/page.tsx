@@ -24,7 +24,7 @@ export default async function ImportPage({
         <p className={styles.success}>{decodeURIComponent(ok)}</p>
       ) : null}
 
-      <form action={importBackup} encType="multipart/form-data" className={styles.form}>
+      <form action={importBackup} className={styles.form}>
         <input
           name="file"
           type="file"

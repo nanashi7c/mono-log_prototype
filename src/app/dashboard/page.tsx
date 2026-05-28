@@ -1,13 +1,17 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { formatYen } from "@/lib/format";
-import type { ItemWithCategory } from "@/types/item";
+import type { Category, Item } from "@/types/item";
 import styles from "./page.module.css";
 
 export const dynamic = "force-dynamic";
 
+type Row = Pick<Item, "id" | "actual_price" | "status"> & {
+  categories: Pick<Category, "id" | "name" | "color">[];
+};
+
 type CategoryStat = {
-  id: string | null;
+  id: number | null;
   name: string;
   color: string;
   count: number;
@@ -16,35 +20,36 @@ type CategoryStat = {
 
 export default async function DashboardPage() {
   const supabase = await createClient();
+  // Active items only (exclude sold/logically-deleted).
   const { data, error } = await supabase
     .from("items")
-    .select("id, price_yen, category:categories(id, name, color)");
+    .select("id, actual_price, status, categories(id, name, color)")
+    .in("status", ["owned", "listed"])
+    .is("deleted_at", null);
 
   if (error) {
     return <p className={styles.error}>{error.message}</p>;
   }
 
-  const items = (data ?? []) as Pick<ItemWithCategory, "id" | "price_yen" | "category">[];
+  const items = (data ?? []) as Row[];
   const totalCount = items.length;
-  const totalYen = items.reduce((acc, i) => acc + (i.price_yen ?? 0), 0);
-  const priced = items.filter((i) => i.price_yen != null).length;
+  const totalYen = items.reduce((acc, i) => acc + (i.actual_price ?? 0), 0);
+  const priced = items.filter((i) => i.actual_price != null).length;
   const avgYen = priced ? Math.round(totalYen / priced) : 0;
 
+  // Each item contributes to every category it belongs to; uncategorized items go to "未分類".
   const byCategory = new Map<string, CategoryStat>();
   for (const item of items) {
-    const key = item.category?.id ?? "__none__";
-    const existing = byCategory.get(key);
-    if (existing) {
-      existing.count += 1;
-      existing.total += item.price_yen ?? 0;
+    if (item.categories.length === 0) {
+      bump(byCategory, "__none__", {
+        id: null,
+        name: "未分類",
+        color: "#94a3b8",
+      }, item.actual_price);
     } else {
-      byCategory.set(key, {
-        id: item.category?.id ?? null,
-        name: item.category?.name ?? "未分類",
-        color: item.category?.color ?? "#94a3b8",
-        count: 1,
-        total: item.price_yen ?? 0,
-      });
+      for (const c of item.categories) {
+        bump(byCategory, String(c.id), { id: c.id, name: c.name, color: c.color }, item.actual_price);
+      }
     }
   }
   const stats = [...byCategory.values()].sort((a, b) => b.total - a.total);
@@ -100,6 +105,21 @@ export default async function DashboardPage() {
       </section>
     </div>
   );
+}
+
+function bump(
+  map: Map<string, CategoryStat>,
+  key: string,
+  cat: { id: number | null; name: string; color: string },
+  price: number | null,
+) {
+  const existing = map.get(key);
+  if (existing) {
+    existing.count += 1;
+    existing.total += price ?? 0;
+    return;
+  }
+  map.set(key, { ...cat, count: 1, total: price ?? 0 });
 }
 
 function Stat({ label, value }: { label: string; value: string }) {

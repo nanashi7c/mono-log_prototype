@@ -10,8 +10,14 @@ export default function NavBar({ email }: { email: string | null }) {
         </Link>
         {email ? (
           <nav className={styles.nav}>
-            <Link href="/" className={styles.link}>
-              一覧
+            <Link href="/items" className={styles.link}>
+              所有物
+            </Link>
+            <Link href="/items/planned" className={styles.link}>
+              購入予定
+            </Link>
+            <Link href="/items/selling" className={styles.link}>
+              出品中
             </Link>
             <Link href="/dashboard" className={styles.link}>
               ダッシュボード
@@ -19,7 +25,9 @@ export default function NavBar({ email }: { email: string | null }) {
             <Link href="/items/new" className={styles.cta}>
               + 追加
             </Link>
-            <span className={styles.email}>{email}</span>
+            <Link href="/mypage" className={styles.email}>
+              {email}
+            </Link>
             <form action="/auth/signout" method="post">
               <button type="submit" className={styles.logout}>
                 ログアウト

@@ -56,6 +56,11 @@
   display: none;
 }
 
+.email:hover {
+  color: var(--slate-700);
+  text-decoration: underline;
+}
+
 @media (min-width: 640px) {
   .email {
     display: inline;
