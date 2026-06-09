@@ -68,7 +68,7 @@ export async function importBackup(formData: FormData) {
         .select("id")
         .single();
       if (error || !data) continue;
-      newId = data.id;
+      newId = String(data.id); // categories.id は integer。Map は string キーのため変換
       byName.set(name, newId);
     }
     if (c.id) categoryIdMap.set(c.id, newId);

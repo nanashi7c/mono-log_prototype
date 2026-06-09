@@ -11,6 +11,8 @@ const supabaseHost = (() => {
 })();
 
 const nextConfig: NextConfig = {
+  // Docker 用: .next/standalone に最小実行ファイルをまとめ、軽量イメージにする
+  output: "standalone",
   images: {
     remotePatterns: supabaseHost
       ? [{ protocol: "https", hostname: supabaseHost, pathname: "/storage/v1/object/**" }]
