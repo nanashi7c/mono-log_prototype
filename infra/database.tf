@@ -1,0 +1,112 @@
+# DB マスターパスワードを自動生成する
+resource "random_password" "db" {
+  length  = 24
+  special = true
+  # RDS のマスターパスワードで使えない文字（/ @ " と空白）を除外した記号集合
+  override_special = "!#$%&*()-_=+[]{}<>:?"
+}
+
+# 生成したパスワードを SSM Parameter Store に暗号化保管（SecureString）
+resource "aws_ssm_parameter" "db_password" {
+  name        = "/${var.project_name}/db/password" # 例: /mono-log/db/password
+  description = "RDS master password (${var.project_name})"
+  type        = "SecureString" # KMS で暗号化して保存
+  value       = random_password.db.result          # 上で生成したパスワード値
+}
+
+# --- RDS (PostgreSQL) ---
+
+# RDSを配置するprivateサブネットのグループ（マルチAZ要件で2つ）
+resource "aws_db_subnet_group" "main" {
+  name       = "${var.project_name}-db-subnet-group"
+  subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_c.id]
+
+  tags = {
+    Name = "${var.project_name}-db-subnet-group"
+  }
+}
+
+# RDS用セキュリティグループ（VPC内からの5432のみ許可。後でEC2のSGに絞る）
+resource "aws_security_group" "rds" {
+  name        = "${var.project_name}-rds-sg"
+  description = "PostgreSQL access for RDS"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "PostgreSQL from within VPC"
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.main.cidr_block] # 暫定: VPC内から。Phase 6でEC2のSGに限定
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1" # 全プロトコル
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-rds-sg"
+  }
+}
+
+# RDS PostgreSQL本体（db.t4g.micro・Single-AZ・private・無料枠）
+resource "aws_db_instance" "main" {
+  identifier     = "${var.project_name}-db"
+  engine         = "postgres"
+  engine_version = "16"           # メジャー16系（最新マイナーを自動選択）
+  instance_class = "db.t4g.micro" # 無料枠対象（750h/月・12ヶ月）
+
+  allocated_storage = 20    # GB単位（無料枠は20GBまで）
+  storage_type      = "gp2"
+  storage_encrypted = true  # 保存時暗号化
+
+  db_name  = "monolog"
+  username = "monolog_admin"
+  password = random_password.db.result # 生成したパスワードを使用
+
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+  vpc_security_group_ids = [aws_security_group.rds.id]
+  multi_az               = false # コスト最小のためSingle-AZ
+  publicly_accessible    = false # インターネット非公開
+
+  auto_minor_version_upgrade = true
+  backup_retention_period    = 7
+
+  # 学習用の設定（本番では見直す）
+  skip_final_snapshot = true  # 削除時に最終スナップショットを取らない
+  deletion_protection = false # 削除保護なし
+
+  tags = {
+    Name = "${var.project_name}-db"
+  }
+}
+
+
+# --- DB接続情報をSSMに保存（非機密なのでString型。アプリが読み出す） ---
+
+resource "aws_ssm_parameter" "db_host" {
+  name  = "/${var.project_name}/db/host"
+  type  = "String"
+  value = aws_db_instance.main.address # RDSエンドポイントのホスト名
+}
+
+resource "aws_ssm_parameter" "db_port" {
+  name  = "/${var.project_name}/db/port"
+  type  = "String"
+  value = tostring(aws_db_instance.main.port) # 5432
+}
+
+resource "aws_ssm_parameter" "db_name" {
+  name  = "/${var.project_name}/db/name"
+  type  = "String"
+  value = aws_db_instance.main.db_name # monolog
+}
+
+resource "aws_ssm_parameter" "db_username" {
+  name  = "/${var.project_name}/db/username"
+  type  = "String"
+  value = aws_db_instance.main.username # monolog_admin
+}

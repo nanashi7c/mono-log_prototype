@@ -18,5 +18,9 @@ terraform {
       source  = "hashicorp/aws" # Terraform Registry 上の AWS プロバイダ
       version = "~> 6.0"        # 6.x 系を許可（最新は 6.49.0）
     }
+    random = {
+      source  = "hashicorp/random" # パスワード等の乱数を生成するプロバイダ
+      version = "~> 3.0"           # 3.x 系を許可
+    }
   }
 }
