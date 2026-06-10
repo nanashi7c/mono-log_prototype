@@ -1,0 +1,21 @@
+# Terraform のローカル作業ディレクトリ（プロバイダ/モジュールのDL先・巨大）
+.terraform/
+.terraform.tfstate.lock.info
+
+# state ファイル（リソースの全属性=機密を平文で含む。絶対にコミットしない）
+*.tfstate
+*.tfstate.*
+
+# 変数ファイル（認証情報や秘密を書く場合があるため除外）
+*.tfvars
+*.tfvars.json
+
+# クラッシュログ
+crash.log
+crash.*.log
+
+# override 系（ローカル限定の上書き）
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
