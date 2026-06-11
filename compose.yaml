@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:16
+    container_name: monolog-dev-db
+    environment:
+      POSTGRES_USER: monolog_admin # RDSと同じマスターユーザ名に合わせる
+      POSTGRES_PASSWORD: localdev # ローカル専用の固定パスワード（本番はSSM）
+      POSTGRES_DB: monolog # RDSと同じDB名
+    ports:
+      - "5433:5432" # ローカルの5432でアクセス
+    volumes:
+      - monolog-dev-db:/var/lib/postgresql/data # データを永続化
+
+volumes:
+  monolog-dev-db:
