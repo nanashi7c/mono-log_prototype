@@ -11,11 +11,7 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# NEXT_PUBLIC_* はビルド時にバンドルへ埋め込まれるため build-arg で渡す
-ARG NEXT_PUBLIC_SUPABASE_URL
-ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
-ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
-ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+# 設定はすべて実行時の環境変数から読むため、ビルド時の build-arg は不要
 RUN npm run build
 
 # ---- runner: 本番実行用の最小イメージ ----
