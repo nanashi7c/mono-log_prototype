@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { signup } from "./actions";
+import { signupAction } from "@/app/auth/actions";
 import styles from "./page.module.css";
 
 export default async function SignupPage({
@@ -12,7 +12,7 @@ export default async function SignupPage({
   return (
     <div className={styles.container}>
       <h1 className={styles.title}>新規登録</h1>
-      <form action={signup} className={styles.form}>
+      <form action={signupAction} className={styles.form}>
         <label className={styles.field}>
           <span className={styles.fieldLabel}>メール</span>
           <input
@@ -24,18 +24,24 @@ export default async function SignupPage({
           />
         </label>
         <label className={styles.field}>
-          <span className={styles.fieldLabel}>パスワード（6文字以上）</span>
+          <span className={styles.fieldLabel}>
+            パスワード（8文字以上・大文字小文字・数字を含む）
+          </span>
           <input
             name="password"
             type="password"
             required
-            minLength={6}
+            minLength={8}
             autoComplete="new-password"
             className={styles.input}
           />
         </label>
-        {error ? <p className={styles.error}>{decodeURIComponent(error)}</p> : null}
-        {message ? <p className={styles.success}>{decodeURIComponent(message)}</p> : null}
+        {error ? (
+          <p className={styles.error}>{decodeURIComponent(error)}</p>
+        ) : null}
+        {message ? (
+          <p className={styles.success}>{decodeURIComponent(message)}</p>
+        ) : null}
         <button type="submit" className={styles.submit}>
           登録
         </button>

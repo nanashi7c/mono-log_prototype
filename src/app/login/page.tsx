@@ -1,19 +1,25 @@
 import Link from "next/link";
-import { login } from "./actions";
+import { loginAction } from "@/app/auth/actions";
 import styles from "./page.module.css";
 
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; redirect?: string }>;
+  searchParams: Promise<{
+    error?: string;
+    redirect?: string;
+    confirmed?: string;
+  }>;
 }) {
-  const { error, redirect } = await searchParams;
+  const { error, redirect, confirmed } = await searchParams;
 
   return (
     <div className={styles.container}>
       <h1 className={styles.title}>ログイン</h1>
-      <form action={login} className={styles.form}>
-        {redirect ? <input type="hidden" name="redirect" value={redirect} /> : null}
+      <form action={loginAction} className={styles.form}>
+        {redirect ? (
+          <input type="hidden" name="redirect" value={redirect} />
+        ) : null}
         <label className={styles.field}>
           <span className={styles.fieldLabel}>メール</span>
           <input
@@ -34,7 +40,14 @@ export default async function LoginPage({
             className={styles.input}
           />
         </label>
-        {error ? <p className={styles.error}>{decodeURIComponent(error)}</p> : null}
+        {confirmed ? (
+          <p className={styles.success}>
+            確認が完了しました。ログインしてください。
+          </p>
+        ) : null}
+        {error ? (
+          <p className={styles.error}>{decodeURIComponent(error)}</p>
+        ) : null}
         <button type="submit" className={styles.submit}>
           ログイン
         </button>
