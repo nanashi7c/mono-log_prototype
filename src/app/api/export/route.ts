@@ -1,27 +1,46 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { eq, inArray } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser } from "@/db/client";
+import { items, categories, itemsCategories } from "@/db/schema";
+import { toItem, toCategory } from "@/db/serialize";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-  const [{ data: categories }, { data: items }] = await Promise.all([
-    supabase.from("categories").select("id, name, color, created_at"),
-    supabase
-      .from("items")
-      .select("id, category_id, name, notes, purchase_date, price_yen, tags, image_path, created_at, updated_at"),
-  ]);
+  const { exportedCategories, exportedItems } = await withUser(user.sub, async (tx) => {
+    // 自分が作成したカテゴリのみ（プリセットは取り込み先に既に存在するため除外）。
+    const catRows = await tx.select().from(categories).where(eq(categories.userId, user.sub));
+    const itemRows = await tx.select().from(items);
+
+    const ids = itemRows.map((r) => r.id);
+    const linkMap = new Map<number, number[]>();
+    if (ids.length > 0) {
+      const links = await tx
+        .select({ itemId: itemsCategories.itemId, categoryId: itemsCategories.categoryId })
+        .from(itemsCategories)
+        .where(inArray(itemsCategories.itemId, ids));
+      for (const l of links) {
+        const arr = linkMap.get(l.itemId) ?? [];
+        arr.push(l.categoryId);
+        linkMap.set(l.itemId, arr);
+      }
+    }
+
+    return {
+      exportedCategories: catRows.map(toCategory),
+      exportedItems: itemRows.map((r) => ({ ...toItem(r), category_ids: linkMap.get(r.id) ?? [] })),
+    };
+  });
 
   const payload = {
     version: 1,
     exported_at: new Date().toISOString(),
-    categories: categories ?? [],
-    items: items ?? [],
+    categories: exportedCategories,
+    items: exportedItems,
   };
 
   const filename = `mono-log-${new Date().toISOString().slice(0, 10)}.json`;

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { logoutAction } from "@/app/auth/actions";
 import styles from "./nav-bar.module.css";
 
 export default function NavBar({ email }: { email: string | null }) {
@@ -28,7 +29,7 @@ export default function NavBar({ email }: { email: string | null }) {
             <Link href="/mypage" className={styles.email}>
               {email}
             </Link>
-            <form action="/auth/signout" method="post">
+            <form action={logoutAction}>
               <button type="submit" className={styles.logout}>
                 ログアウト
               </button>

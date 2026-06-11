@@ -1,7 +1,10 @@
-import { createClient } from "@/lib/supabase/server";
-import { isAdminConfigured } from "@/lib/supabase/admin";
+import { redirect } from "next/navigation";
+import { eq } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { getUserCreatedAt } from "@/lib/auth/cognito";
+import { withUser } from "@/db/client";
+import { users } from "@/db/schema";
 import { changePassword, deleteAccount, updateProfile } from "./actions";
-import type { Profile } from "@/types/item";
 import styles from "./page.module.css";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +16,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   "current-password-wrong": "現在のパスワードが正しくありません。",
   "password-wrong": "パスワードが正しくありません。",
   "confirmation-mismatch": "確認テキストが一致しません。「削除」と正確に入力してください。",
-  "admin-not-configured": "アカウント削除は管理者環境変数（SUPABASE_SERVICE_ROLE_KEY）が必要です。",
+  "admin-not-configured": "アカウント削除は管理者設定が必要です。",
   "email-missing": "メールアドレスが取得できません。",
 };
 
@@ -40,19 +43,17 @@ export default async function MyPage({
   searchParams: Promise<{ error?: string; ok?: string }>;
 }) {
   const { error, ok } = await searchParams;
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return null; // middleware redirects, defensive guard
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
 
-  const { data: profileData } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("user_id", user.id)
-    .maybeSingle();
-  const profile = (profileData as Profile | null) ?? null;
-  const adminConfigured = isAdminConfigured();
+  const rows = await withUser(user.sub, (tx) =>
+    tx.select({ username: users.username }).from(users).where(eq(users.id, user.sub)).limit(1),
+  );
+  const username = rows[0]?.username ?? "";
+  const createdAt = await getUserCreatedAt(user.email);
+  const lastSignIn = user.authTime != null ? new Date(user.authTime * 1000).toISOString() : null;
+  // 退会は Cognito のセルフサービスで常に可能。
+  const adminConfigured = true;
 
   const errorMsg = error ? ERROR_MESSAGES[error] ?? decodeURIComponent(error) : null;
   const okMsg = ok ? SUCCESS_MESSAGES[ok] ?? decodeURIComponent(ok) : null;
@@ -68,13 +69,13 @@ export default async function MyPage({
         <h2 className={styles.sectionTitle}>アカウント情報</h2>
         <dl className={styles.grid2}>
           <dt className={styles.gridLabel}>ユーザー ID</dt>
-          <dd className={styles.readonly}>{user.id}</dd>
+          <dd className={styles.readonly}>{user.sub}</dd>
           <dt className={styles.gridLabel}>メール</dt>
           <dd className={styles.readonly}>{user.email}</dd>
           <dt className={styles.gridLabel}>登録日時</dt>
-          <dd className={styles.readonly}>{formatDateTime(user.created_at)}</dd>
+          <dd className={styles.readonly}>{formatDateTime(createdAt)}</dd>
           <dt className={styles.gridLabel}>最終ログイン</dt>
-          <dd className={styles.readonly}>{formatDateTime(user.last_sign_in_at)}</dd>
+          <dd className={styles.readonly}>{formatDateTime(lastSignIn)}</dd>
         </dl>
       </section>
 
@@ -86,7 +87,7 @@ export default async function MyPage({
             <input
               name="username"
               required
-              defaultValue={profile?.username ?? ""}
+              defaultValue={username}
               className={styles.input}
             />
           </label>
@@ -144,8 +145,7 @@ export default async function MyPage({
         </p>
         {!adminConfigured ? (
           <p className={styles.note}>
-            アカウント削除を有効化するには、サーバー環境変数{" "}
-            <code>SUPABASE_SERVICE_ROLE_KEY</code> を設定してください。
+            アカウント削除を有効化するには、サーバー環境変数を設定してください。
           </p>
         ) : null}
         <form action={deleteAccount}>

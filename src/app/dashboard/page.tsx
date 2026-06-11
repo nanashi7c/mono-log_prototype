@@ -1,5 +1,9 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
+import { redirect } from "next/navigation";
+import { and, eq, isNull, inArray } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser } from "@/db/client";
+import { items, categories, itemsCategories } from "@/db/schema";
 import { formatYen } from "@/lib/format";
 import type { Category, Item } from "@/types/item";
 import styles from "./page.module.css";
@@ -19,27 +23,52 @@ type CategoryStat = {
 };
 
 export default async function DashboardPage() {
-  const supabase = await createClient();
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
+
   // Active items only (exclude sold/logically-deleted).
-  const { data, error } = await supabase
-    .from("items")
-    .select("id, actual_price, status, categories(id, name, color)")
-    .in("status", ["owned", "listed"])
-    .is("deleted_at", null);
+  const items_: Row[] = await withUser(user.sub, async (tx) => {
+    const rows = await tx
+      .select({ id: items.id, actualPrice: items.actualPrice, status: items.status })
+      .from(items)
+      .where(and(inArray(items.status, ["owned", "listed"]), isNull(items.deletedAt)));
 
-  if (error) {
-    return <p className={styles.error}>{error.message}</p>;
-  }
+    const ids = rows.map((r) => r.id);
+    const catMap = new Map<number, Pick<Category, "id" | "name" | "color">[]>();
+    if (ids.length > 0) {
+      const links = await tx
+        .select({
+          itemId: itemsCategories.itemId,
+          id: categories.id,
+          name: categories.name,
+          color: categories.color,
+        })
+        .from(itemsCategories)
+        .innerJoin(categories, eq(itemsCategories.categoryId, categories.id))
+        .where(inArray(itemsCategories.itemId, ids));
+      for (const l of links) {
+        const arr = catMap.get(l.itemId) ?? [];
+        arr.push({ id: l.id, name: l.name, color: l.color });
+        catMap.set(l.itemId, arr);
+      }
+    }
 
-  const items = (data ?? []) as Row[];
-  const totalCount = items.length;
-  const totalYen = items.reduce((acc, i) => acc + (i.actual_price ?? 0), 0);
-  const priced = items.filter((i) => i.actual_price != null).length;
+    return rows.map((r) => ({
+      id: r.id,
+      actual_price: r.actualPrice,
+      status: r.status,
+      categories: catMap.get(r.id) ?? [],
+    }));
+  });
+
+  const totalCount = items_.length;
+  const totalYen = items_.reduce((acc, i) => acc + (i.actual_price ?? 0), 0);
+  const priced = items_.filter((i) => i.actual_price != null).length;
   const avgYen = priced ? Math.round(totalYen / priced) : 0;
 
   // Each item contributes to every category it belongs to; uncategorized items go to "未分類".
   const byCategory = new Map<string, CategoryStat>();
-  for (const item of items) {
+  for (const item of items_) {
     if (item.categories.length === 0) {
       bump(byCategory, "__none__", {
         id: null,

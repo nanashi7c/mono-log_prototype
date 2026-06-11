@@ -1,35 +1,32 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
+import { and, eq, isNull, inArray, count } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser } from "@/db/client";
+import { items } from "@/db/schema";
 import styles from "./page.module.css";
 
 export const dynamic = "force-dynamic";
 
 export default async function LandingPage() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
+  const user = await getCurrentUser();
   if (!user) return <UnauthenticatedLanding />;
 
   // Counts for the four navigation cards.
-  const [owned, planned, listed] = await Promise.all([
-    supabase
-      .from("items")
-      .select("id", { count: "exact", head: true })
-      .in("status", ["owned", "listed"])
-      .is("deleted_at", null),
-    supabase
-      .from("items")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "planned")
-      .is("deleted_at", null),
-    supabase
-      .from("items")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "listed")
-      .is("deleted_at", null),
-  ]);
+  const { owned, planned, listed } = await withUser(user.sub, async (tx) => {
+    const ownedRes = await tx
+      .select({ c: count() })
+      .from(items)
+      .where(and(inArray(items.status, ["owned", "listed"]), isNull(items.deletedAt)));
+    const plannedRes = await tx
+      .select({ c: count() })
+      .from(items)
+      .where(and(eq(items.status, "planned"), isNull(items.deletedAt)));
+    const listedRes = await tx
+      .select({ c: count() })
+      .from(items)
+      .where(and(eq(items.status, "listed"), isNull(items.deletedAt)));
+    return { owned: ownedRes[0].c, planned: plannedRes[0].c, listed: listedRes[0].c };
+  });
 
   const username = user.email?.split("@")[0] ?? "";
 
@@ -47,21 +44,21 @@ export default async function LandingPage() {
           href="/items"
           label="OWNED"
           title="所有物"
-          count={owned.count ?? 0}
+          count={owned}
           desc="手元にある物・出品中の物を一覧表示"
         />
         <NavCard
           href="/items/planned"
           label="PLANNED"
           title="購入予定"
-          count={planned.count ?? 0}
+          count={planned}
           desc="買おうとしている物を管理"
         />
         <NavCard
           href="/items/selling"
           label="LISTED"
           title="出品中"
-          count={listed.count ?? 0}
+          count={listed}
           desc="出品中の物と損益を確認"
         />
         <NavCard href="/dashboard" label="STATS" title="ダッシュボード" desc="保有資産・カテゴリ別の集計" />

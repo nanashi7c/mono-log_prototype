@@ -2,23 +2,41 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { createClient } from "@/lib/supabase/server";
+import { and, eq } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser } from "@/db/client";
+import { items, categories, itemsCategories } from "@/db/schema";
+import type { ItemStatus } from "@/types/item";
 
-type BackupCategory = { id?: string; name?: unknown; color?: unknown };
+const STATUSES: ItemStatus[] = ["planned", "owned", "listed", "sold"];
+
+type BackupCategory = { id?: number | string; name?: unknown; color?: unknown };
 type BackupItem = {
-  id?: string;
-  category_id?: string | null;
   name?: unknown;
+  status?: unknown;
+  jan_code?: unknown;
+  quantity?: unknown;
   notes?: unknown;
-  purchase_date?: unknown;
-  price_yen?: unknown;
-  tags?: unknown;
+  actual_price?: unknown;
+  purchased_at?: unknown;
+  category_ids?: unknown;
 };
 
 function asString(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const s = v.trim();
   return s ? s : null;
+}
+
+function asNonNegInt(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  const n = Math.floor(v);
+  return n >= 0 ? n : null;
+}
+
+function asPosInt(v: unknown): number | null {
+  const n = asNonNegInt(v);
+  return n != null && n > 0 ? n : null;
 }
 
 export async function importBackup(formData: FormData) {
@@ -42,68 +60,81 @@ export async function importBackup(formData: FormData) {
   const rawCategories = Array.isArray(root.categories) ? (root.categories as BackupCategory[]) : [];
   const rawItems = Array.isArray(root.items) ? (root.items as BackupItem[]) : [];
 
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await getCurrentUser();
   if (!user) redirect("/login");
 
-  // Map old category id -> new category id for the current user.
-  const categoryIdMap = new Map<string, string>();
+  let inserted = 0;
+  try {
+    inserted = await withUser(user.sub, async (tx) => {
+      // 旧カテゴリ id → 新カテゴリ id の対応表。
+      const idMap = new Map<string, number>();
+      // unique(user_id, name) 衝突を避けるため、既存カテゴリを名前で索引する。
+      const existing = await tx
+        .select({ id: categories.id, name: categories.name })
+        .from(categories);
+      const byName = new Map<string, number>();
+      for (const c of existing) byName.set(c.name, c.id);
 
-  // Pre-fetch existing categories by name to avoid unique-violation on (user_id, name).
-  const { data: existingCats } = await supabase.from("categories").select("id, name");
-  const byName = new Map<string, string>();
-  for (const c of existingCats ?? []) byName.set(c.name, c.id);
+      for (const c of rawCategories) {
+        const name = asString(c.name);
+        if (!name) continue;
+        let newId = byName.get(name);
+        if (newId == null) {
+          await tx
+            .insert(categories)
+            .values({ userId: user.sub, name, color: asString(c.color) ?? "#94a3b8" })
+            .onConflictDoNothing();
+          const found = await tx
+            .select({ id: categories.id })
+            .from(categories)
+            .where(and(eq(categories.userId, user.sub), eq(categories.name, name)))
+            .limit(1);
+          newId = found[0]?.id;
+          if (newId != null) byName.set(name, newId);
+        }
+        if (c.id != null && newId != null) idMap.set(String(c.id), newId);
+      }
 
-  for (const c of rawCategories) {
-    const name = asString(c.name);
-    if (!name) continue;
-    const color = asString(c.color) ?? "#94a3b8";
-    let newId = byName.get(name);
-    if (!newId) {
-      const { data, error } = await supabase
-        .from("categories")
-        .insert({ user_id: user.id, name, color })
-        .select("id")
-        .single();
-      if (error || !data) continue;
-      newId = String(data.id); // categories.id は integer。Map は string キーのため変換
-      byName.set(name, newId);
-    }
-    if (c.id) categoryIdMap.set(c.id, newId);
-  }
+      let count = 0;
+      for (const it of rawItems) {
+        const name = asString(it.name);
+        if (!name) continue;
+        const statusRaw = String(it.status ?? "");
+        const status: ItemStatus = (STATUSES as string[]).includes(statusRaw)
+          ? (statusRaw as ItemStatus)
+          : "owned";
+        const ins = await tx
+          .insert(items)
+          .values({
+            userId: user.sub,
+            status,
+            name,
+            janCode: asString(it.jan_code),
+            quantity: asPosInt(it.quantity) ?? 1,
+            notes: asString(it.notes),
+            actualPrice: asNonNegInt(it.actual_price),
+            purchasedAt: asString(it.purchased_at),
+          })
+          .returning({ id: items.id });
+        const itemId = ins[0].id;
 
-  const rowsToInsert = rawItems
-    .map((it) => {
-      const name = asString(it.name);
-      if (!name) return null;
-      const oldCat = typeof it.category_id === "string" ? it.category_id : null;
-      const newCat = oldCat ? categoryIdMap.get(oldCat) ?? null : null;
-      const price =
-        typeof it.price_yen === "number" && Number.isFinite(it.price_yen)
-          ? Math.max(0, Math.floor(it.price_yen))
-          : null;
-      const tags = Array.isArray(it.tags) ? it.tags.filter((t): t is string => typeof t === "string") : [];
-      return {
-        user_id: user.id,
-        category_id: newCat,
-        name,
-        notes: asString(it.notes),
-        purchase_date: asString(it.purchase_date),
-        price_yen: price,
-        tags,
-      };
-    })
-    .filter((x): x is NonNullable<typeof x> => x !== null);
-
-  if (rowsToInsert.length > 0) {
-    const { error } = await supabase.from("items").insert(rowsToInsert);
-    if (error) {
-      redirect(`/import?error=${encodeURIComponent(error.message)}`);
-    }
+        const cids = Array.isArray(it.category_ids)
+          ? it.category_ids
+              .map((x) => idMap.get(String(x)))
+              .filter((x): x is number => x != null)
+          : [];
+        if (cids.length > 0) {
+          await tx.insert(itemsCategories).values(cids.map((cid) => ({ itemId, categoryId: cid })));
+        }
+        count++;
+      }
+      return count;
+    });
+  } catch (e) {
+    redirect(`/import?error=${encodeURIComponent((e as Error).message)}`);
   }
 
   revalidatePath("/");
-  redirect(`/import?ok=${encodeURIComponent(`${rowsToInsert.length} 件のアイテムを取り込みました。`)}`);
+  revalidatePath("/items");
+  redirect(`/import?ok=${encodeURIComponent(`${inserted} 件のアイテムを取り込みました。`)}`);
 }
