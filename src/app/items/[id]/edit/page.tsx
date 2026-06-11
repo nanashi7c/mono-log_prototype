@@ -1,18 +1,23 @@
-import { notFound } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { notFound, redirect } from "next/navigation";
+import { asc, eq } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser } from "@/db/client";
+import {
+  items,
+  plans,
+  listings,
+  itemsCategories,
+  categories,
+  platforms,
+  services,
+  sizes,
+  shipping,
+} from "@/db/schema";
+import { toItem, toPlan, toListing } from "@/db/serialize";
 import { signedImageUrl } from "@/lib/image";
 import ItemForm from "@/components/item-form";
 import { deleteItem, updateItem } from "../../actions";
-import type {
-  Category,
-  Item,
-  Listing,
-  Plan,
-  Platform,
-  Service,
-  Shipping,
-  Size,
-} from "@/types/item";
+import type { Item, Listing, Plan } from "@/types/item";
 
 export const dynamic = "force-dynamic";
 
@@ -29,41 +34,76 @@ export default async function EditItemPage({
 
   const { error } = await searchParams;
 
-  const supabase = await createClient();
-  const [itemRes, planRes, listingRes, linkRes, categoriesRes, platformsRes, servicesRes, sizesRes] =
-    await Promise.all([
-      supabase.from("items").select("*").eq("id", itemId).maybeSingle(),
-      supabase.from("plans").select("*").eq("item_id", itemId).maybeSingle(),
-      supabase.from("listings").select("*").eq("item_id", itemId).maybeSingle(),
-      supabase.from("items_categories").select("category_id").eq("item_id", itemId),
-      supabase.from("categories").select("id, name, color").order("name", { ascending: true }),
-      supabase.from("platforms").select("id, name").order("name", { ascending: true }),
-      supabase.from("services").select("id, shipping_service").order("shipping_service", { ascending: true }),
-      supabase.from("sizes").select("id, shipping_size").order("shipping_size", { ascending: true }),
-    ]);
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
 
-  const item = itemRes.data as Item | null;
-  if (!item) notFound();
+  const result = await withUser(user.sub, async (tx) => {
+    const itemRows = await tx.select().from(items).where(eq(items.id, itemId)).limit(1);
+    if (!itemRows[0]) return null;
+    const item: Item = toItem(itemRows[0]);
 
-  const plan = (planRes.data as Plan | null) ?? null;
-  const listing = (listingRes.data as Listing | null) ?? null;
-  const selectedCategoryIds = (linkRes.data ?? []).map((r) => r.category_id as number);
+    const planRows = await tx.select().from(plans).where(eq(plans.itemId, itemId)).limit(1);
+    const plan: Plan | null = planRows[0] ? toPlan(planRows[0]) : null;
 
-  // Resolve service/size from the shipping_id reference for the form's initial values.
-  let initialServiceId: number | null = null;
-  let initialSizeId: number | null = null;
-  if (listing?.shipping_id != null) {
-    const { data: ship } = await supabase
-      .from("shipping")
-      .select("shipping_service_id, shipping_size_id")
-      .eq("id", listing.shipping_id)
-      .maybeSingle();
-    const s = ship as Pick<Shipping, "shipping_service_id" | "shipping_size_id"> | null;
-    initialServiceId = s?.shipping_service_id ?? null;
-    initialSizeId = s?.shipping_size_id ?? null;
-  }
+    const listingRows = await tx.select().from(listings).where(eq(listings.itemId, itemId)).limit(1);
+    const listing: Listing | null = listingRows[0] ? toListing(listingRows[0]) : null;
 
-  const imageUrl = await signedImageUrl(item.image_url);
+    const links = await tx
+      .select({ categoryId: itemsCategories.categoryId })
+      .from(itemsCategories)
+      .where(eq(itemsCategories.itemId, itemId));
+    const selectedCategoryIds = links.map((r) => r.categoryId);
+
+    const cats = await tx
+      .select({ id: categories.id, name: categories.name, color: categories.color })
+      .from(categories)
+      .orderBy(asc(categories.name));
+    const plats = await tx
+      .select({ id: platforms.id, name: platforms.name })
+      .from(platforms)
+      .orderBy(asc(platforms.name));
+    const svcs = await tx
+      .select({ id: services.id, shipping_service: services.shippingService })
+      .from(services)
+      .orderBy(asc(services.shippingService));
+    const szs = await tx
+      .select({ id: sizes.id, shipping_size: sizes.shippingSize })
+      .from(sizes)
+      .orderBy(asc(sizes.shippingSize));
+
+    // listings の shipping_id 参照からフォーム初期値の service/size を解決する。
+    let initialServiceId: number | null = null;
+    let initialSizeId: number | null = null;
+    if (listing?.shipping_id != null) {
+      const sh = await tx
+        .select({
+          serviceId: shipping.shippingServiceId,
+          sizeId: shipping.shippingSizeId,
+        })
+        .from(shipping)
+        .where(eq(shipping.id, listing.shipping_id))
+        .limit(1);
+      initialServiceId = sh[0]?.serviceId ?? null;
+      initialSizeId = sh[0]?.sizeId ?? null;
+    }
+
+    return {
+      item,
+      plan,
+      listing,
+      selectedCategoryIds,
+      cats,
+      plats,
+      svcs,
+      szs,
+      initialServiceId,
+      initialSizeId,
+    };
+  });
+
+  if (!result) notFound();
+
+  const imageUrl = await signedImageUrl(result.item.image_url);
 
   const updateAction = updateItem.bind(null, itemId);
   const deleteAction = deleteItem.bind(null, itemId);
@@ -71,17 +111,17 @@ export default async function EditItemPage({
   return (
     <ItemForm
       mode="edit"
-      item={item}
-      plan={plan}
-      listing={listing}
+      item={result.item}
+      plan={result.plan}
+      listing={result.listing}
       imageUrl={imageUrl}
-      categories={(categoriesRes.data ?? []) as Pick<Category, "id" | "name" | "color">[]}
-      selectedCategoryIds={selectedCategoryIds}
-      platforms={(platformsRes.data ?? []) as Pick<Platform, "id" | "name">[]}
-      services={(servicesRes.data ?? []) as Pick<Service, "id" | "shipping_service">[]}
-      sizes={(sizesRes.data ?? []) as Pick<Size, "id" | "shipping_size">[]}
-      initialServiceId={initialServiceId}
-      initialSizeId={initialSizeId}
+      categories={result.cats}
+      selectedCategoryIds={result.selectedCategoryIds}
+      platforms={result.plats}
+      services={result.svcs}
+      sizes={result.szs}
+      initialServiceId={result.initialServiceId}
+      initialSizeId={result.initialSizeId}
       action={updateAction}
       onDelete={deleteAction}
       error={error}

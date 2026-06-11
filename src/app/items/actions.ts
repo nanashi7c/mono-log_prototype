@@ -2,8 +2,20 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { createClient } from "@/lib/supabase/server";
-import { IMAGE_BUCKET } from "@/lib/image";
+import { and, eq } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser, type Tx } from "@/db/client";
+import {
+  items,
+  categories,
+  itemsCategories,
+  plans,
+  listings,
+  shipping,
+  shippingFees,
+  platforms,
+} from "@/db/schema";
+import { putImage, deleteImage } from "@/lib/image";
 import { computeListingMetrics } from "@/lib/listing-calc";
 import type { ItemStatus } from "@/types/item";
 
@@ -126,144 +138,126 @@ function parseForm(formData: FormData): ParsedForm {
   };
 }
 
-async function authedSupabase() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+async function authed() {
+  const user = await getCurrentUser();
   if (!user) redirect("/login");
-  return { supabase, user };
+  return user;
 }
 
+// 画像を S3 に保存し、保存したオブジェクトキー（= items.image_url に格納する値）を返す。
 async function uploadImage(file: File, userId: string, itemId: number): Promise<string> {
-  const supabase = await createClient();
   const ext = (file.name.split(".").pop() ?? "bin").toLowerCase();
-  const path = `${userId}/${itemId}/${Date.now()}.${ext}`;
-  const { error } = await supabase.storage.from(IMAGE_BUCKET).upload(path, file, {
-    cacheControl: "3600",
-    upsert: false,
-    contentType: file.type || undefined,
-  });
-  if (error) throw new Error(`image upload failed: ${error.message}`);
-  return path;
+  const key = `${userId}/${itemId}/${Date.now()}.${ext}`;
+  const buffer = Buffer.from(await file.arrayBuffer());
+  await putImage(key, buffer, file.type || undefined);
+  return key;
 }
 
-async function removeImage(path: string) {
-  const supabase = await createClient();
-  await supabase.storage.from(IMAGE_BUCKET).remove([path]);
+async function removeImage(key: string) {
+  await deleteImage(key);
 }
 
-// Find or create a shipping row for (service_id, size_id).
+// (service_id, size_id) の組合せに対応する shipping 行を取得（無ければ作成）。
 async function resolveShippingId(
+  tx: Tx,
   serviceId: number | null,
   sizeId: number | null,
 ): Promise<number | null> {
   if (serviceId == null || sizeId == null) return null;
-  const supabase = await createClient();
-  const { data: found } = await supabase
-    .from("shipping")
-    .select("id")
-    .eq("shipping_service_id", serviceId)
-    .eq("shipping_size_id", sizeId)
-    .maybeSingle();
-  if (found) return found.id;
-  const { data: created, error } = await supabase
-    .from("shipping")
-    .insert({ shipping_service_id: serviceId, shipping_size_id: sizeId })
-    .select("id")
-    .single();
-  if (error || !created) throw new Error(`shipping resolve failed: ${error?.message ?? ""}`);
-  return created.id;
+  const found = await tx
+    .select({ id: shipping.id })
+    .from(shipping)
+    .where(and(eq(shipping.shippingServiceId, serviceId), eq(shipping.shippingSizeId, sizeId)))
+    .limit(1);
+  if (found[0]) return found[0].id;
+  const created = await tx
+    .insert(shipping)
+    .values({ shippingServiceId: serviceId, shippingSizeId: sizeId })
+    .returning({ id: shipping.id });
+  return created[0].id;
 }
 
-// Insert any new category names (idempotent), then return all chosen category IDs.
-async function resolveCategoryIds(parsed: ParsedForm, userId: string): Promise<number[]> {
+// 新規カテゴリ名を作成（冪等）し、選択された全カテゴリ ID を返す。
+async function resolveCategoryIds(tx: Tx, parsed: ParsedForm, userId: string): Promise<number[]> {
   const ids = new Set(parsed.category_ids);
-  if (parsed.new_category_names.length === 0) return [...ids];
-
-  const supabase = await createClient();
   for (const name of parsed.new_category_names) {
-    const { data: created, error } = await supabase
-      .from("categories")
-      .insert({ user_id: userId, name })
-      .select("id")
-      .single();
-    if (error) {
-      // Most likely a unique-violation from the user already owning this name; fetch instead.
-      const { data: existing } = await supabase
-        .from("categories")
-        .select("id")
-        .eq("user_id", userId)
-        .eq("name", name)
-        .maybeSingle();
-      if (existing) ids.add(existing.id);
-      continue;
-    }
-    if (created) ids.add(created.id);
+    // unique(user_id, name) 衝突は無視し、その後 ID を取得する。
+    await tx.insert(categories).values({ userId, name }).onConflictDoNothing();
+    const found = await tx
+      .select({ id: categories.id })
+      .from(categories)
+      .where(and(eq(categories.userId, userId), eq(categories.name, name)))
+      .limit(1);
+    if (found[0]) ids.add(found[0].id);
   }
   return [...ids];
 }
 
-async function syncItemCategories(itemId: number, categoryIds: number[]) {
-  const supabase = await createClient();
-  // Replace strategy: delete current rows, insert fresh ones. Small N per item.
-  await supabase.from("items_categories").delete().eq("item_id", itemId);
+async function syncItemCategories(tx: Tx, itemId: number, categoryIds: number[]) {
+  // 置換方式: 現行行を削除し、新しい行を挿入する（item あたり N は小さい）。
+  await tx.delete(itemsCategories).where(eq(itemsCategories.itemId, itemId));
   if (categoryIds.length === 0) return;
-  const rows = categoryIds.map((cid) => ({ item_id: itemId, category_id: cid }));
-  const { error } = await supabase.from("items_categories").insert(rows);
-  if (error) throw new Error(`category link failed: ${error.message}`);
+  await tx
+    .insert(itemsCategories)
+    .values(categoryIds.map((cid) => ({ itemId, categoryId: cid })));
 }
 
-async function upsertPlan(itemId: number, parsed: ParsedForm) {
-  const supabase = await createClient();
+async function upsertPlan(tx: Tx, itemId: number, parsed: ParsedForm) {
   if (parsed.status !== "planned") {
-    // Drop plan record once the item has moved on. Plan data is conceptually pre-purchase.
-    await supabase.from("plans").delete().eq("item_id", itemId);
+    // item が購入予定でなくなったら plan 行は破棄する（plan は購入前の情報）。
+    await tx.delete(plans).where(eq(plans.itemId, itemId));
     return;
   }
-  const planRow = { item_id: itemId, ...parsed.plan };
-  const { error } = await supabase.from("plans").upsert(planRow, { onConflict: "item_id" });
-  if (error) throw new Error(`plan save failed: ${error.message}`);
+  const values = {
+    plannedPurchaseYear: parsed.plan.planned_purchase_year,
+    plannedPurchaseMonth: parsed.plan.planned_purchase_month,
+    listPrice: parsed.plan.list_price,
+    purchasePrice: parsed.plan.purchase_price,
+    productUrl: parsed.plan.product_url,
+    dealPeriod: parsed.plan.deal_period,
+  };
+  await tx
+    .insert(plans)
+    .values({ itemId, ...values })
+    .onConflictDoUpdate({ target: plans.itemId, set: values });
 }
 
-// Look up the per-(service, size) shipping fee from shipping_fees.
+// shipping_fees から (service, size) の送料を取得。
 async function lookupShippingFee(
+  tx: Tx,
   serviceId: number | null,
   sizeId: number | null,
 ): Promise<number | null> {
   if (serviceId == null || sizeId == null) return null;
-  const supabase = await createClient();
-  const { data } = await supabase
-    .from("shipping_fees")
-    .select("fee")
-    .eq("shipping_service_id", serviceId)
-    .eq("shipping_size_id", sizeId)
-    .maybeSingle();
-  // `numeric` returns as string from supabase-js; coerce here.
-  return data?.fee != null ? Number(data.fee) : null;
+  const r = await tx
+    .select({ fee: shippingFees.fee })
+    .from(shippingFees)
+    .where(
+      and(eq(shippingFees.shippingServiceId, serviceId), eq(shippingFees.shippingSizeId, sizeId)),
+    )
+    .limit(1);
+  return r[0]?.fee ?? null;
 }
 
-async function lookupPlatformFeeRate(platformId: number | null): Promise<number | null> {
+async function lookupPlatformFeeRate(tx: Tx, platformId: number | null): Promise<number | null> {
   if (platformId == null) return null;
-  const supabase = await createClient();
-  const { data } = await supabase
-    .from("platforms")
-    .select("fee_rate")
-    .eq("id", platformId)
-    .maybeSingle();
-  return data?.fee_rate != null ? Number(data.fee_rate) : null;
+  const r = await tx
+    .select({ feeRate: platforms.feeRate })
+    .from(platforms)
+    .where(eq(platforms.id, platformId))
+    .limit(1);
+  return r[0]?.feeRate ?? null;
 }
 
-async function upsertListing(itemId: number, parsed: ParsedForm) {
-  const supabase = await createClient();
+async function upsertListing(tx: Tx, itemId: number, parsed: ParsedForm) {
   if (parsed.status !== "listed") {
-    await supabase.from("listings").delete().eq("item_id", itemId);
+    await tx.delete(listings).where(eq(listings.itemId, itemId));
     return;
   }
-  const shipping_id = await resolveShippingId(parsed.listing.service_id, parsed.listing.size_id);
+  const shippingId = await resolveShippingId(tx, parsed.listing.service_id, parsed.listing.size_id);
   const [shipping_fee, platform_fee_rate] = await Promise.all([
-    lookupShippingFee(parsed.listing.service_id, parsed.listing.size_id),
-    lookupPlatformFeeRate(parsed.listing.platform_id),
+    lookupShippingFee(tx, parsed.listing.service_id, parsed.listing.size_id),
+    lookupPlatformFeeRate(tx, parsed.listing.platform_id),
   ]);
 
   const calc = computeListingMetrics({
@@ -275,23 +269,24 @@ async function upsertListing(itemId: number, parsed: ParsedForm) {
     platform_fee_rate,
   });
 
-  const row = {
-    item_id: itemId,
-    shipping_id,
-    platform_id: parsed.listing.platform_id,
+  const values = {
+    shippingId,
+    platformId: parsed.listing.platform_id,
     quantity: parsed.listing.quantity,
-    selling_price: parsed.listing.selling_price,
-    packaging_cost: parsed.listing.packaging_cost,
-    work_time_hours: parsed.listing.work_time_hours,
-    labor_rate: parsed.listing.labor_rate,
-    selling_fee: calc.selling_fee,
-    work_time_cost: calc.work_time_cost,
-    operating_benefit: calc.operating_benefit,
-    ordinary_profit: calc.ordinary_profit,
-    is_listing: calc.is_listing,
+    sellingPrice: parsed.listing.selling_price,
+    packagingCost: parsed.listing.packaging_cost,
+    workTimeHours: parsed.listing.work_time_hours,
+    laborRate: parsed.listing.labor_rate,
+    sellingFee: calc.selling_fee,
+    workTimeCost: calc.work_time_cost,
+    operatingBenefit: calc.operating_benefit,
+    ordinaryProfit: calc.ordinary_profit,
+    isListing: calc.is_listing,
   };
-  const { error } = await supabase.from("listings").upsert(row, { onConflict: "item_id" });
-  if (error) throw new Error(`listing save failed: ${error.message}`);
+  await tx
+    .insert(listings)
+    .values({ itemId, ...values })
+    .onConflictDoUpdate({ target: listings.itemId, set: values });
 }
 
 function revalidateAll(itemId?: number) {
@@ -310,99 +305,92 @@ export async function createItem(formData: FormData) {
   const parsed = parseForm(formData);
   if (!parsed.name) redirect("/items/new?error=name-required");
 
-  const { supabase, user } = await authedSupabase();
+  const user = await authed();
 
-  const categoryIds = await resolveCategoryIds(parsed, user.id);
-
-  const { data: created, error } = await supabase
-    .from("items")
-    .insert({
-      user_id: user.id,
-      status: parsed.status,
-      name: parsed.name,
-      jan_code: parsed.jan_code,
-      quantity: parsed.quantity,
-      notes: parsed.notes,
-      actual_price: parsed.actual_price,
-      purchased_at: parsed.purchased_at,
-    })
-    .select("id")
-    .single();
-
-  if (error || !created) {
-    redirect(`/items/new?error=${encodeURIComponent(error?.message ?? "insert failed")}`);
-  }
-
-  const itemId = created.id as number;
-
+  let newId: number;
   try {
-    await syncItemCategories(itemId, categoryIds);
-    await upsertPlan(itemId, parsed);
-    await upsertListing(itemId, parsed);
+    newId = await withUser(user.sub, async (tx) => {
+      const categoryIds = await resolveCategoryIds(tx, parsed, user.sub);
+
+      const inserted = await tx
+        .insert(items)
+        .values({
+          userId: user.sub,
+          status: parsed.status,
+          name: parsed.name,
+          janCode: parsed.jan_code,
+          quantity: parsed.quantity,
+          notes: parsed.notes,
+          actualPrice: parsed.actual_price,
+          purchasedAt: parsed.purchased_at,
+        })
+        .returning({ id: items.id });
+      const itemId = inserted[0].id;
+
+      await syncItemCategories(tx, itemId, categoryIds);
+      await upsertPlan(tx, itemId, parsed);
+      await upsertListing(tx, itemId, parsed);
+
+      if (parsed.image) {
+        const key = await uploadImage(parsed.image, user.sub, itemId);
+        await tx.update(items).set({ imageUrl: key }).where(eq(items.id, itemId));
+      }
+
+      return itemId;
+    });
   } catch (e) {
-    redirect(`/items/${itemId}/edit?error=${encodeURIComponent((e as Error).message)}`);
+    redirect(`/items/new?error=${encodeURIComponent((e as Error).message)}`);
   }
 
-  if (parsed.image) {
-    try {
-      const path = await uploadImage(parsed.image, user.id, itemId);
-      await supabase.from("items").update({ image_url: path }).eq("id", itemId);
-    } catch (e) {
-      // Item already exists; surface the upload error on edit page.
-      redirect(`/items/${itemId}/edit?error=${encodeURIComponent((e as Error).message)}`);
-    }
-  }
-
-  revalidateAll(itemId);
-  redirect(`/items/${itemId}`);
+  revalidateAll(newId);
+  redirect(`/items/${newId}`);
 }
 
 export async function updateItem(itemId: number, formData: FormData) {
   const parsed = parseForm(formData);
   if (!parsed.name) redirect(`/items/${itemId}/edit?error=name-required`);
 
-  const { supabase, user } = await authedSupabase();
-
-  const categoryIds = await resolveCategoryIds(parsed, user.id);
-
-  const { data: existing } = await supabase
-    .from("items")
-    .select("image_url")
-    .eq("id", itemId)
-    .single();
-
-  let nextImageUrl: string | null | undefined;
-  if (parsed.delete_image && existing?.image_url) {
-    await removeImage(existing.image_url);
-    nextImageUrl = null;
-  }
-  if (parsed.image) {
-    if (existing?.image_url) await removeImage(existing.image_url);
-    nextImageUrl = await uploadImage(parsed.image, user.id, itemId);
-  }
-
-  const { error } = await supabase
-    .from("items")
-    .update({
-      status: parsed.status,
-      name: parsed.name,
-      jan_code: parsed.jan_code,
-      quantity: parsed.quantity,
-      notes: parsed.notes,
-      actual_price: parsed.actual_price,
-      purchased_at: parsed.purchased_at,
-      ...(nextImageUrl !== undefined ? { image_url: nextImageUrl } : {}),
-    })
-    .eq("id", itemId);
-
-  if (error) {
-    redirect(`/items/${itemId}/edit?error=${encodeURIComponent(error.message)}`);
-  }
+  const user = await authed();
 
   try {
-    await syncItemCategories(itemId, categoryIds);
-    await upsertPlan(itemId, parsed);
-    await upsertListing(itemId, parsed);
+    await withUser(user.sub, async (tx) => {
+      const categoryIds = await resolveCategoryIds(tx, parsed, user.sub);
+
+      const existing = await tx
+        .select({ imageUrl: items.imageUrl })
+        .from(items)
+        .where(eq(items.id, itemId))
+        .limit(1);
+      const currentKey = existing[0]?.imageUrl ?? null;
+
+      let nextImageUrl: string | null | undefined;
+      if (parsed.delete_image && currentKey) {
+        await removeImage(currentKey);
+        nextImageUrl = null;
+      }
+      if (parsed.image) {
+        if (currentKey) await removeImage(currentKey);
+        nextImageUrl = await uploadImage(parsed.image, user.sub, itemId);
+      }
+
+      await tx
+        .update(items)
+        .set({
+          status: parsed.status,
+          name: parsed.name,
+          janCode: parsed.jan_code,
+          quantity: parsed.quantity,
+          notes: parsed.notes,
+          actualPrice: parsed.actual_price,
+          purchasedAt: parsed.purchased_at,
+          ...(nextImageUrl !== undefined ? { imageUrl: nextImageUrl } : {}),
+        })
+        .where(eq(items.id, itemId));
+
+      await syncItemCategories(tx, itemId, categoryIds);
+      await upsertPlan(tx, itemId, parsed);
+      await upsertListing(tx, itemId, parsed);
+    });
   } catch (e) {
     redirect(`/items/${itemId}/edit?error=${encodeURIComponent((e as Error).message)}`);
   }
@@ -412,19 +400,17 @@ export async function updateItem(itemId: number, formData: FormData) {
 }
 
 export async function deleteItem(itemId: number) {
-  const { supabase } = await authedSupabase();
+  const user = await authed();
 
-  const { data: existing } = await supabase
-    .from("items")
-    .select("image_url")
-    .eq("id", itemId)
-    .single();
-  if (existing?.image_url) await removeImage(existing.image_url);
-
-  const { error } = await supabase.from("items").delete().eq("id", itemId);
-  if (error) {
-    redirect(`/items/${itemId}/edit?error=${encodeURIComponent(error.message)}`);
-  }
+  await withUser(user.sub, async (tx) => {
+    const existing = await tx
+      .select({ imageUrl: items.imageUrl })
+      .from(items)
+      .where(eq(items.id, itemId))
+      .limit(1);
+    if (existing[0]?.imageUrl) await removeImage(existing[0].imageUrl);
+    await tx.delete(items).where(eq(items.id, itemId));
+  });
 
   revalidateAll();
   redirect("/items");

@@ -1,5 +1,21 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
+import { redirect } from "next/navigation";
+import {
+  and,
+  or,
+  eq,
+  isNull,
+  ilike,
+  inArray,
+  notInArray,
+  asc,
+  desc,
+  type SQL,
+} from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser } from "@/db/client";
+import { items, categories, itemsCategories } from "@/db/schema";
+import { toItem } from "@/db/serialize";
 import { signedImageUrl } from "@/lib/image";
 import ItemCard from "@/components/item-card";
 import FilterBar from "@/components/filter-bar";
@@ -17,49 +33,79 @@ export default async function OwnedItemsPage({
   searchParams: Promise<Search>;
 }) {
   const { q, category } = await searchParams;
-  const supabase = await createClient();
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
 
-  const { data: categoriesData } = await supabase
-    .from("categories")
-    .select("id, name, color")
-    .order("name", { ascending: true });
-  const categories = (categoriesData ?? []) as Pick<Category, "id" | "name" | "color">[];
+  const { list, categoryOptions } = await withUser(user.sub, async (tx) => {
+    const cats = await tx
+      .select({ id: categories.id, name: categories.name, color: categories.color })
+      .from(categories)
+      .orderBy(asc(categories.name));
 
-  let query = supabase
-    .from("items")
-    .select("*, categories(id, name, color)")
-    .in("status", ["owned", "listed"])
-    .is("deleted_at", null)
-    .order("created_at", { ascending: false });
+    const conds: SQL[] = [
+      inArray(items.status, ["owned", "listed"]),
+      isNull(items.deletedAt),
+    ];
 
-  if (q && q.trim()) {
-    const term = q.trim();
-    const like = `%${term.replace(/[%_]/g, (m) => `\\${m}`)}%`;
-    query = query.or(`name.ilike.${like},notes.ilike.${like}`);
-  }
+    if (q && q.trim()) {
+      const term = `%${q.trim().replace(/[%_]/g, (m) => `\\${m}`)}%`;
+      conds.push(or(ilike(items.name, term), ilike(items.notes, term))!);
+    }
 
-  // Category filter is M:N: resolve item IDs from items_categories first.
-  if (category === "__none__") {
-    const { data: catRows } = await supabase.from("items_categories").select("item_id");
-    const taggedIds = (catRows ?? []).map((r) => r.item_id);
-    if (taggedIds.length > 0) query = query.not("id", "in", `(${taggedIds.join(",")})`);
-  } else if (category) {
-    const catId = Number(category);
-    const { data: catRows } = await supabase
-      .from("items_categories")
-      .select("item_id")
-      .eq("category_id", catId);
-    const ids = (catRows ?? []).map((r) => r.item_id);
-    query = ids.length > 0 ? query.in("id", ids) : query.eq("id", -1);
-  }
+    // カテゴリ絞り込みは M:N。先に items_categories から対象 item ID を解決する。
+    if (category === "__none__") {
+      const tagged = await tx
+        .selectDistinct({ itemId: itemsCategories.itemId })
+        .from(itemsCategories);
+      const taggedIds = tagged.map((r) => r.itemId);
+      if (taggedIds.length > 0) conds.push(notInArray(items.id, taggedIds));
+    } else if (category) {
+      const catId = Number(category);
+      const linked = await tx
+        .select({ itemId: itemsCategories.itemId })
+        .from(itemsCategories)
+        .where(eq(itemsCategories.categoryId, catId));
+      const ids = linked.map((r) => r.itemId);
+      if (ids.length === 0) {
+        return { list: [] as ItemWithCategories[], categoryOptions: cats };
+      }
+      conds.push(inArray(items.id, ids));
+    }
 
-  const { data: items, error } = await query;
+    const rows = await tx
+      .select()
+      .from(items)
+      .where(and(...conds))
+      .orderBy(desc(items.createdAt));
 
-  if (error) {
-    return <p className={styles.error}>読み込みに失敗しました: {error.message}</p>;
-  }
+    // 各 item のカテゴリ（M:N）をまとめて取得する。
+    const itemIds = rows.map((r) => r.id);
+    const catMap = new Map<number, Pick<Category, "id" | "name" | "color">[]>();
+    if (itemIds.length > 0) {
+      const links = await tx
+        .select({
+          itemId: itemsCategories.itemId,
+          id: categories.id,
+          name: categories.name,
+          color: categories.color,
+        })
+        .from(itemsCategories)
+        .innerJoin(categories, eq(itemsCategories.categoryId, categories.id))
+        .where(inArray(itemsCategories.itemId, itemIds));
+      for (const l of links) {
+        const arr = catMap.get(l.itemId) ?? [];
+        arr.push({ id: l.id, name: l.name, color: l.color });
+        catMap.set(l.itemId, arr);
+      }
+    }
 
-  const list = (items ?? []) as ItemWithCategories[];
+    const list: ItemWithCategories[] = rows.map((r) => ({
+      ...toItem(r),
+      categories: catMap.get(r.id) ?? [],
+    }));
+    return { list, categoryOptions: cats };
+  });
+
   const signedUrls = await Promise.all(list.map((i) => signedImageUrl(i.image_url)));
 
   return (
@@ -74,7 +120,7 @@ export default async function OwnedItemsPage({
         </Link>
       </div>
 
-      <FilterBar categories={categories} />
+      <FilterBar categories={categoryOptions} />
 
       {list.length === 0 ? (
         <div className={styles.empty}>

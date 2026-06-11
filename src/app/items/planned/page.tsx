@@ -1,5 +1,10 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
+import { redirect } from "next/navigation";
+import { and, eq, isNull, desc, inArray } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser } from "@/db/client";
+import { items, plans, categories, itemsCategories } from "@/db/schema";
+import { toItem, toPlan } from "@/db/serialize";
 import { formatYen } from "@/lib/format";
 import { markAsPurchased } from "../transitions";
 import type { Item, Plan, Category } from "@/types/item";
@@ -20,19 +25,46 @@ function formatPlannedMonth(plan: Plan | null): string | null {
 }
 
 export default async function PlannedItemsPage() {
-  const supabase = await createClient();
-  const { data, error } = await supabase
-    .from("items")
-    .select("*, categories(id, name, color), plan:plans(*)")
-    .eq("status", "planned")
-    .is("deleted_at", null)
-    .order("created_at", { ascending: false });
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
 
-  if (error) {
-    return <p className={styles.error}>読み込みに失敗しました: {error.message}</p>;
-  }
+  const rows: Row[] = await withUser(user.sub, async (tx) => {
+    const itemRows = await tx
+      .select()
+      .from(items)
+      .where(and(eq(items.status, "planned"), isNull(items.deletedAt)))
+      .orderBy(desc(items.createdAt));
 
-  const rows = (data ?? []) as Row[];
+    const ids = itemRows.map((r) => r.id);
+    const planMap = new Map<number, Plan>();
+    const catMap = new Map<number, Pick<Category, "id" | "name" | "color">[]>();
+    if (ids.length > 0) {
+      const planRows = await tx.select().from(plans).where(inArray(plans.itemId, ids));
+      for (const p of planRows) planMap.set(p.itemId, toPlan(p));
+
+      const links = await tx
+        .select({
+          itemId: itemsCategories.itemId,
+          id: categories.id,
+          name: categories.name,
+          color: categories.color,
+        })
+        .from(itemsCategories)
+        .innerJoin(categories, eq(itemsCategories.categoryId, categories.id))
+        .where(inArray(itemsCategories.itemId, ids));
+      for (const l of links) {
+        const arr = catMap.get(l.itemId) ?? [];
+        arr.push({ id: l.id, name: l.name, color: l.color });
+        catMap.set(l.itemId, arr);
+      }
+    }
+
+    return itemRows.map((r) => ({
+      ...toItem(r),
+      categories: catMap.get(r.id) ?? [],
+      plan: planMap.get(r.id) ?? null,
+    }));
+  });
 
   return (
     <div className={styles.container}>

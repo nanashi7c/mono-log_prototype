@@ -2,15 +2,15 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { createClient } from "@/lib/supabase/server";
+import { eq } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser } from "@/db/client";
+import { items, listings } from "@/db/schema";
 
 async function authed() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await getCurrentUser();
   if (!user) redirect("/login");
-  return { supabase, user };
+  return user;
 }
 
 function revalidateItemViews() {
@@ -23,67 +23,51 @@ function revalidateItemViews() {
 
 // planned -> owned. 購入予定一覧の「購入済み」ボタン。
 export async function markAsPurchased(itemId: number) {
-  const { supabase } = await authed();
-  const { error } = await supabase
-    .from("items")
-    .update({ status: "owned" })
-    .eq("id", itemId);
-  if (error) throw new Error(error.message);
+  const user = await authed();
+  await withUser(user.sub, (tx) =>
+    tx.update(items).set({ status: "owned" }).where(eq(items.id, itemId)),
+  );
   revalidateItemViews();
 }
 
 // owned -> listed. 所有物一覧の「出品する」ボタン。listings 行を作成する。
 export async function listItem(itemId: number) {
-  const { supabase } = await authed();
-  // listings.item_id is UNIQUE; ignore duplicate-insert if a row already exists.
-  const { error: insertError } = await supabase
-    .from("listings")
-    .insert({ item_id: itemId });
-  if (insertError && insertError.code !== "23505") {
-    throw new Error(insertError.message);
-  }
-  const { error: updateError } = await supabase
-    .from("items")
-    .update({ status: "listed" })
-    .eq("id", itemId);
-  if (updateError) throw new Error(updateError.message);
+  const user = await authed();
+  // listings.item_id は UNIQUE。既に行があれば重複 insert を無視する。
+  await withUser(user.sub, async (tx) => {
+    await tx.insert(listings).values({ itemId }).onConflictDoNothing();
+    await tx.update(items).set({ status: "listed" }).where(eq(items.id, itemId));
+  });
   revalidateItemViews();
 }
 
 // owned -> planned. 所有物一覧の「購入予定へ戻す」ボタン。
 export async function restoreToPlanned(itemId: number) {
-  const { supabase } = await authed();
-  const { error } = await supabase
-    .from("items")
-    .update({ status: "planned" })
-    .eq("id", itemId);
-  if (error) throw new Error(error.message);
+  const user = await authed();
+  await withUser(user.sub, (tx) =>
+    tx.update(items).set({ status: "planned" }).where(eq(items.id, itemId)),
+  );
   revalidateItemViews();
 }
 
 // listed -> sold. 出品商品一覧の「売却済み」ボタン。論理削除（deleted_at を記録）。
 export async function markAsSold(itemId: number) {
-  const { supabase } = await authed();
-  const { error } = await supabase
-    .from("items")
-    .update({ status: "sold", deleted_at: new Date().toISOString() })
-    .eq("id", itemId);
-  if (error) throw new Error(error.message);
+  const user = await authed();
+  await withUser(user.sub, (tx) =>
+    tx
+      .update(items)
+      .set({ status: "sold", deletedAt: new Date() })
+      .where(eq(items.id, itemId)),
+  );
   revalidateItemViews();
 }
 
 // listed -> owned. 出品商品一覧の「出品取り下げ」ボタン。listings 行を削除する。
 export async function unlistItem(itemId: number) {
-  const { supabase } = await authed();
-  const { error: deleteError } = await supabase
-    .from("listings")
-    .delete()
-    .eq("item_id", itemId);
-  if (deleteError) throw new Error(deleteError.message);
-  const { error: updateError } = await supabase
-    .from("items")
-    .update({ status: "owned" })
-    .eq("id", itemId);
-  if (updateError) throw new Error(updateError.message);
+  const user = await authed();
+  await withUser(user.sub, async (tx) => {
+    await tx.delete(listings).where(eq(listings.itemId, itemId));
+    await tx.update(items).set({ status: "owned" }).where(eq(items.id, itemId));
+  });
   revalidateItemViews();
 }

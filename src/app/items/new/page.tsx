@@ -1,7 +1,10 @@
-import { createClient } from "@/lib/supabase/server";
+import { redirect } from "next/navigation";
+import { asc } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser } from "@/db/client";
+import { categories, platforms, services, sizes } from "@/db/schema";
 import ItemForm from "@/components/item-form";
 import { createItem } from "../actions";
-import type { Category, Platform, Service, Size } from "@/types/item";
 
 export const dynamic = "force-dynamic";
 
@@ -11,22 +14,36 @@ export default async function NewItemPage({
   searchParams: Promise<{ error?: string }>;
 }) {
   const { error } = await searchParams;
-  const supabase = await createClient();
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
 
-  const [categoriesRes, platformsRes, servicesRes, sizesRes] = await Promise.all([
-    supabase.from("categories").select("id, name, color").order("name", { ascending: true }),
-    supabase.from("platforms").select("id, name").order("name", { ascending: true }),
-    supabase.from("services").select("id, shipping_service").order("shipping_service", { ascending: true }),
-    supabase.from("sizes").select("id, shipping_size").order("shipping_size", { ascending: true }),
-  ]);
+  const data = await withUser(user.sub, async (tx) => {
+    const cats = await tx
+      .select({ id: categories.id, name: categories.name, color: categories.color })
+      .from(categories)
+      .orderBy(asc(categories.name));
+    const plats = await tx
+      .select({ id: platforms.id, name: platforms.name })
+      .from(platforms)
+      .orderBy(asc(platforms.name));
+    const svcs = await tx
+      .select({ id: services.id, shipping_service: services.shippingService })
+      .from(services)
+      .orderBy(asc(services.shippingService));
+    const szs = await tx
+      .select({ id: sizes.id, shipping_size: sizes.shippingSize })
+      .from(sizes)
+      .orderBy(asc(sizes.shippingSize));
+    return { cats, plats, svcs, szs };
+  });
 
   return (
     <ItemForm
       mode="create"
-      categories={(categoriesRes.data ?? []) as Pick<Category, "id" | "name" | "color">[]}
-      platforms={(platformsRes.data ?? []) as Pick<Platform, "id" | "name">[]}
-      services={(servicesRes.data ?? []) as Pick<Service, "id" | "shipping_service">[]}
-      sizes={(sizesRes.data ?? []) as Pick<Size, "id" | "shipping_size">[]}
+      categories={data.cats}
+      platforms={data.plats}
+      services={data.svcs}
+      sizes={data.szs}
       action={createItem}
       error={error}
     />

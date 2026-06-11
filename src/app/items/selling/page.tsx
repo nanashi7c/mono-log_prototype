@@ -1,5 +1,10 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
+import { redirect } from "next/navigation";
+import { and, eq, isNull, desc, inArray } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser } from "@/db/client";
+import { items, listings, shipping, shippingFees } from "@/db/schema";
+import { toItem, toListing } from "@/db/serialize";
 import { formatYen } from "@/lib/format";
 import { markAsSold, unlistItem } from "../transitions";
 import type { Item, Listing } from "@/types/item";
@@ -10,38 +15,58 @@ export const dynamic = "force-dynamic";
 type Row = Item & { listing: Listing | null };
 
 export default async function SellingItemsPage() {
-  const supabase = await createClient();
-  const { data, error } = await supabase
-    .from("items")
-    .select("*, listing:listings(*)")
-    .eq("status", "listed")
-    .is("deleted_at", null)
-    .order("created_at", { ascending: false });
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
 
-  if (error) {
-    return <p className={styles.error}>読み込みに失敗しました: {error.message}</p>;
-  }
+  const { rows, shippingFeeByShippingId } = await withUser(user.sub, async (tx) => {
+    const itemRows = await tx
+      .select()
+      .from(items)
+      .where(and(eq(items.status, "listed"), isNull(items.deletedAt)))
+      .orderBy(desc(items.createdAt));
 
-  const rows = (data ?? []) as Row[];
-
-  // Shipping fee isn't a column on `listings`; resolve it from shipping_fees via the shipping ref.
-  const shippingIds = [...new Set(rows.map((r) => r.listing?.shipping_id).filter((x): x is number => x != null))];
-  const shippingFeeByShippingId = new Map<number, number>();
-  if (shippingIds.length > 0) {
-    const { data: ships } = await supabase
-      .from("shipping")
-      .select("id, shipping_service_id, shipping_size_id")
-      .in("id", shippingIds);
-    for (const s of ships ?? []) {
-      const { data: fee } = await supabase
-        .from("shipping_fees")
-        .select("fee")
-        .eq("shipping_service_id", s.shipping_service_id)
-        .eq("shipping_size_id", s.shipping_size_id)
-        .maybeSingle();
-      if (fee?.fee != null) shippingFeeByShippingId.set(s.id, Number(fee.fee));
+    const ids = itemRows.map((r) => r.id);
+    const listingMap = new Map<number, Listing>();
+    if (ids.length > 0) {
+      const lrows = await tx.select().from(listings).where(inArray(listings.itemId, ids));
+      for (const l of lrows) listingMap.set(l.itemId, toListing(l));
     }
-  }
+    const rows: Row[] = itemRows.map((r) => ({
+      ...toItem(r),
+      listing: listingMap.get(r.id) ?? null,
+    }));
+
+    // 送料は listings の列ではないため、shipping 参照経由で shipping_fees から解決する。
+    const shippingIds = [
+      ...new Set(rows.map((r) => r.listing?.shipping_id).filter((x): x is number => x != null)),
+    ];
+    const shippingFeeByShippingId = new Map<number, number>();
+    if (shippingIds.length > 0) {
+      const ships = await tx
+        .select({
+          id: shipping.id,
+          serviceId: shipping.shippingServiceId,
+          sizeId: shipping.shippingSizeId,
+        })
+        .from(shipping)
+        .where(inArray(shipping.id, shippingIds));
+      for (const s of ships) {
+        const fee = await tx
+          .select({ fee: shippingFees.fee })
+          .from(shippingFees)
+          .where(
+            and(
+              eq(shippingFees.shippingServiceId, s.serviceId),
+              eq(shippingFees.shippingSizeId, s.sizeId),
+            ),
+          )
+          .limit(1);
+        if (fee[0]?.fee != null) shippingFeeByShippingId.set(s.id, fee[0].fee);
+      }
+    }
+
+    return { rows, shippingFeeByShippingId };
+  });
 
   return (
     <div className={styles.container}>

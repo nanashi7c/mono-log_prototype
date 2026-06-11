@@ -1,14 +1,26 @@
 import Image from "next/image";
 import Link from "next/link";
-import { notFound } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { notFound, redirect } from "next/navigation";
+import { and, eq } from "drizzle-orm";
+import { getCurrentUser } from "@/lib/auth/session";
+import { withUser } from "@/db/client";
+import {
+  items,
+  plans,
+  listings,
+  itemsCategories,
+  categories as categoriesTable,
+  platforms,
+  shipping,
+  services,
+  sizes,
+  shippingFees,
+} from "@/db/schema";
+import { toItem, toPlan, toListing } from "@/db/serialize";
 import { signedImageUrl } from "@/lib/image";
 import { formatDate, formatYen } from "@/lib/format";
 import type {
-  Category,
-  Item,
   ItemStatus,
-  Listing,
   Plan,
   Platform,
   Service,
@@ -41,75 +53,85 @@ export default async function ItemDetailPage({
   const itemId = Number(id);
   if (!Number.isFinite(itemId)) notFound();
 
-  const supabase = await createClient();
-  const [itemRes, planRes, listingRes, linkRes] = await Promise.all([
-    supabase.from("items").select("*").eq("id", itemId).maybeSingle(),
-    supabase.from("plans").select("*").eq("item_id", itemId).maybeSingle(),
-    supabase.from("listings").select("*").eq("item_id", itemId).maybeSingle(),
-    supabase
-      .from("items_categories")
-      .select("category:categories(id, name, color)")
-      .eq("item_id", itemId),
-  ]);
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
 
-  const item = itemRes.data as Item | null;
-  if (!item) notFound();
+  const result = await withUser(user.sub, async (tx) => {
+    const itemRows = await tx.select().from(items).where(eq(items.id, itemId)).limit(1);
+    if (!itemRows[0]) return null;
+    const item = toItem(itemRows[0]);
 
-  const plan = (planRes.data as Plan | null) ?? null;
-  const listing = (listingRes.data as Listing | null) ?? null;
-  // PostgREST embeds the M:1 reference as a single object; cast via unknown to bypass
-  // the array-shape inferred from supabase-js without generated DB types.
-  const categories = ((linkRes.data ?? []) as unknown as {
-    category: Pick<Category, "id" | "name" | "color"> | null;
-  }[])
-    .map((r) => r.category)
-    .filter((c): c is Pick<Category, "id" | "name" | "color"> => c != null);
+    const planRows = await tx.select().from(plans).where(eq(plans.itemId, itemId)).limit(1);
+    const plan = planRows[0] ? toPlan(planRows[0]) : null;
 
-  // Resolve listing-related labels when present.
-  let platform: Pick<Platform, "id" | "name"> | null = null;
-  let service: Pick<Service, "id" | "shipping_service"> | null = null;
-  let size: Pick<Size, "id" | "shipping_size"> | null = null;
-  let shippingFee: number | null = null;
-  if (listing) {
-    if (listing.platform_id != null) {
-      const { data } = await supabase
-        .from("platforms")
-        .select("id, name")
-        .eq("id", listing.platform_id)
-        .maybeSingle();
-      platform = (data as Pick<Platform, "id" | "name"> | null) ?? null;
-    }
-    if (listing.shipping_id != null) {
-      const { data: ship } = await supabase
-        .from("shipping")
-        .select("shipping_service_id, shipping_size_id")
-        .eq("id", listing.shipping_id)
-        .maybeSingle();
-      if (ship) {
-        const [{ data: svc }, { data: sz }, { data: fee }] = await Promise.all([
-          supabase
-            .from("services")
-            .select("id, shipping_service")
-            .eq("id", ship.shipping_service_id)
-            .maybeSingle(),
-          supabase
-            .from("sizes")
-            .select("id, shipping_size")
-            .eq("id", ship.shipping_size_id)
-            .maybeSingle(),
-          supabase
-            .from("shipping_fees")
-            .select("fee")
-            .eq("shipping_service_id", ship.shipping_service_id)
-            .eq("shipping_size_id", ship.shipping_size_id)
-            .maybeSingle(),
-        ]);
-        service = (svc as Pick<Service, "id" | "shipping_service"> | null) ?? null;
-        size = (sz as Pick<Size, "id" | "shipping_size"> | null) ?? null;
-        shippingFee = fee?.fee != null ? Number(fee.fee) : null;
+    const listingRows = await tx.select().from(listings).where(eq(listings.itemId, itemId)).limit(1);
+    const listing = listingRows[0] ? toListing(listingRows[0]) : null;
+
+    const categories = await tx
+      .select({
+        id: categoriesTable.id,
+        name: categoriesTable.name,
+        color: categoriesTable.color,
+      })
+      .from(itemsCategories)
+      .innerJoin(categoriesTable, eq(itemsCategories.categoryId, categoriesTable.id))
+      .where(eq(itemsCategories.itemId, itemId));
+
+    let platform: Pick<Platform, "id" | "name"> | null = null;
+    let service: Pick<Service, "id" | "shipping_service"> | null = null;
+    let size: Pick<Size, "id" | "shipping_size"> | null = null;
+    let shippingFee: number | null = null;
+    if (listing) {
+      if (listing.platform_id != null) {
+        const p = await tx
+          .select({ id: platforms.id, name: platforms.name })
+          .from(platforms)
+          .where(eq(platforms.id, listing.platform_id))
+          .limit(1);
+        platform = p[0] ?? null;
+      }
+      if (listing.shipping_id != null) {
+        const sh = await tx
+          .select({
+            serviceId: shipping.shippingServiceId,
+            sizeId: shipping.shippingSizeId,
+          })
+          .from(shipping)
+          .where(eq(shipping.id, listing.shipping_id))
+          .limit(1);
+        if (sh[0]) {
+          const svc = await tx
+            .select({ id: services.id, shipping_service: services.shippingService })
+            .from(services)
+            .where(eq(services.id, sh[0].serviceId))
+            .limit(1);
+          const sz = await tx
+            .select({ id: sizes.id, shipping_size: sizes.shippingSize })
+            .from(sizes)
+            .where(eq(sizes.id, sh[0].sizeId))
+            .limit(1);
+          const fee = await tx
+            .select({ fee: shippingFees.fee })
+            .from(shippingFees)
+            .where(
+              and(
+                eq(shippingFees.shippingServiceId, sh[0].serviceId),
+                eq(shippingFees.shippingSizeId, sh[0].sizeId),
+              ),
+            )
+            .limit(1);
+          service = svc[0] ?? null;
+          size = sz[0] ?? null;
+          shippingFee = fee[0]?.fee ?? null;
+        }
       }
     }
-  }
+
+    return { item, plan, listing, categories, platform, service, size, shippingFee };
+  });
+
+  if (!result) notFound();
+  const { item, plan, listing, categories, platform, service, size, shippingFee } = result;
 
   const imageUrl = await signedImageUrl(item.image_url);
   const plannedMonth = formatPlannedMonth(plan);
