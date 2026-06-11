@@ -27,3 +27,10 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "item_images" {
     }
   }
 }
+
+# アプリが読むバケット名をSSMに保存（非機密なのでString。EC2が S3_IMAGE_BUCKET として読む）
+resource "aws_ssm_parameter" "s3_bucket" {
+  name  = "/${var.project_name}/s3/bucket"
+  type  = "String"
+  value = aws_s3_bucket.item_images.bucket
+}

@@ -59,6 +59,26 @@ resource "aws_iam_role_policy" "ssm_read" {
   policy = data.aws_iam_policy_document.ssm_read.json
 }
 
+# アプリが使う S3（画像の presign/保存/削除）と Cognito（登録日時表示）の権限
+data "aws_iam_policy_document" "app" {
+  statement {
+    sid       = "ItemImagesObjectRW"
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.item_images.arn}/*"]
+  }
+  statement {
+    sid       = "CognitoAdminGetUser"
+    actions   = ["cognito-idp:AdminGetUser"]
+    resources = [aws_cognito_user_pool.main.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "app" {
+  name   = "${var.project_name}-app"
+  role   = aws_iam_role.ec2.id
+  policy = data.aws_iam_policy_document.app.json
+}
+
 # EC2 にロールを紐付けるためのインスタンスプロファイル
 resource "aws_iam_instance_profile" "ec2" {
   name = "${var.project_name}-ec2-profile"
@@ -125,12 +145,70 @@ resource "aws_instance" "app" {
   vpc_security_group_ids = [aws_security_group.ec2.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
-  # 起動時にDockerを導入・起動（SSH鍵は使わずSSM接続）
+  # 起動時に Docker を導入し、ECR からアプリを pull して起動する（SSH 不要・SSM 接続）。
+  # 機密(DB/Cognito/S3)は実行時に SSM から取得。初回はイメージ未 push のため失敗するが、
+  # 30 秒ごとに再試行し、push 後に自動起動する（Restart=on-failure）。
   user_data = <<-EOF
 #!/bin/bash
+set -euo pipefail
 dnf install -y docker
 systemctl enable --now docker
-usermod -aG docker ec2-user
+
+# Terraform が埋め込む非機密の設定
+cat > /etc/mono-log.env <<ENV
+REGION=${var.aws_region}
+PROJECT=${var.project_name}
+REGISTRY=${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com
+IMAGE=${aws_ecr_repository.app.repository_url}:latest
+ENV
+
+# 起動スクリプト（実行時に SSM から機密を取得して docker run）
+cat > /usr/local/bin/mono-log-run.sh <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+. /etc/mono-log.env
+get() { aws ssm get-parameter --region "$REGION" --name "$1" $2 --query Parameter.Value --output text; }
+DB_HOST=$(get "/$PROJECT/db/host" "")
+DB_PORT=$(get "/$PROJECT/db/port" "")
+DB_NAME=$(get "/$PROJECT/db/name" "")
+DB_PASSWORD=$(get "/$PROJECT/db/app_password" "--with-decryption")
+POOL=$(get "/$PROJECT/cognito/user_pool_id" "")
+CLIENT=$(get "/$PROJECT/cognito/client_id" "")
+BUCKET=$(get "/$PROJECT/s3/bucket" "")
+aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+docker pull "$IMAGE"
+docker rm -f mono-log >/dev/null 2>&1 || true
+docker run -d --name mono-log --restart unless-stopped -p 80:3000 \
+  -e NODE_ENV=production \
+  -e DB_HOST="$DB_HOST" -e DB_PORT="$DB_PORT" -e DB_NAME="$DB_NAME" \
+  -e DB_USER=monolog_app -e DB_PASSWORD="$DB_PASSWORD" \
+  -e AWS_REGION="$REGION" \
+  -e COGNITO_USER_POOL_ID="$POOL" -e COGNITO_CLIENT_ID="$CLIENT" \
+  -e S3_IMAGE_BUCKET="$BUCKET" \
+  "$IMAGE"
+SCRIPT
+chmod +x /usr/local/bin/mono-log-run.sh
+
+# systemd で管理（再起動後も起動。失敗時は30秒ごとに再試行）
+cat > /etc/systemd/system/mono-log.service <<'UNIT'
+[Unit]
+Description=mono-log app container
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/mono-log-run.sh
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now mono-log.service || true
 EOF
 
   metadata_options {

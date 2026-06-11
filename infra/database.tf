@@ -10,8 +10,8 @@ resource "random_password" "db" {
 resource "aws_ssm_parameter" "db_password" {
   name        = "/${var.project_name}/db/password" # 例: /mono-log/db/password
   description = "RDS master password (${var.project_name})"
-  type        = "SecureString" # KMS で暗号化して保存
-  value       = random_password.db.result          # 上で生成したパスワード値
+  type        = "SecureString"            # KMS で暗号化して保存
+  value       = random_password.db.result # 上で生成したパスワード値
 }
 
 # --- RDS (PostgreSQL) ---
@@ -59,9 +59,9 @@ resource "aws_db_instance" "main" {
   engine_version = "16"           # メジャー16系（最新マイナーを自動選択）
   instance_class = "db.t4g.micro" # 無料枠対象（750h/月・12ヶ月）
 
-  allocated_storage = 20    # GB単位（無料枠は20GBまで）
+  allocated_storage = 20 # GB単位（無料枠は20GBまで）
   storage_type      = "gp2"
-  storage_encrypted = true  # 保存時暗号化
+  storage_encrypted = true # 保存時暗号化
 
   db_name  = "monolog"
   username = "monolog_admin"
@@ -109,4 +109,20 @@ resource "aws_ssm_parameter" "db_username" {
   name  = "/${var.project_name}/db/username"
   type  = "String"
   value = aws_db_instance.main.username # monolog_admin
+}
+
+# --- アプリ接続ロール(monolog_app)のパスワード ---
+# RLS が効く非所有者ロール。本番ではデプロイ時に ALTER ROLE で適用する（migration のベタ書きは使わない）。
+
+resource "random_password" "db_app" {
+  length           = 24
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?" # RDS で使えない文字を除外
+}
+
+resource "aws_ssm_parameter" "db_app_password" {
+  name        = "/${var.project_name}/db/app_password"
+  description = "Password for the non-owner app role monolog_app"
+  type        = "SecureString"
+  value       = random_password.db_app.result
 }
