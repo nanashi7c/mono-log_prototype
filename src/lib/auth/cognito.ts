@@ -6,6 +6,8 @@ import {
   ChangePasswordCommand,
   DeleteUserCommand,
   AdminGetUserCommand,
+  UpdateUserAttributesCommand,
+  VerifyUserAttributeCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 
@@ -117,6 +119,33 @@ export async function changePassword(
 // 自分自身のアカウントを削除（セルフサービス。アクセストークンで認可）
 export async function deleteOwnUser(accessToken: string): Promise<void> {
   await client.send(new DeleteUserCommand({ AccessToken: accessToken }));
+}
+
+// メールアドレス変更を申請（新メールに確認コードが送られる）。検証は verifyEmailUpdate で。
+export async function requestEmailUpdate(
+  accessToken: string,
+  newEmail: string,
+): Promise<void> {
+  await client.send(
+    new UpdateUserAttributesCommand({
+      AccessToken: accessToken,
+      UserAttributes: [{ Name: "email", Value: newEmail }],
+    }),
+  );
+}
+
+// 新メールに届いた確認コードでメール変更を確定する。
+export async function verifyEmailUpdate(
+  accessToken: string,
+  code: string,
+): Promise<void> {
+  await client.send(
+    new VerifyUserAttributeCommand({
+      AccessToken: accessToken,
+      AttributeName: "email",
+      Code: code,
+    }),
+  );
 }
 
 // 登録日時を取得（admin API。権限が無い等で失敗したら null）

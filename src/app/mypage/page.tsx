@@ -4,7 +4,13 @@ import { getCurrentUser } from "@/lib/auth/session";
 import { getUserCreatedAt } from "@/lib/auth/cognito";
 import { withUser } from "@/db/client";
 import { users } from "@/db/schema";
-import { changePassword, deleteAccount, updateProfile } from "./actions";
+import {
+  changePassword,
+  confirmEmailChange,
+  deleteAccount,
+  requestEmailChange,
+  updateProfile,
+} from "./actions";
 import styles from "./page.module.css";
 
 export const dynamic = "force-dynamic";
@@ -18,11 +24,13 @@ const ERROR_MESSAGES: Record<string, string> = {
   "confirmation-mismatch": "確認テキストが一致しません。「削除」と正確に入力してください。",
   "admin-not-configured": "アカウント削除は管理者設定が必要です。",
   "email-missing": "メールアドレスが取得できません。",
+  "email-invalid": "メールアドレスの形式が正しくありません。",
 };
 
 const SUCCESS_MESSAGES: Record<string, string> = {
   "profile-updated": "プロフィールを更新しました。",
   "password-updated": "パスワードを変更しました。",
+  "email-updated": "メールアドレスを変更しました。",
 };
 
 function formatDateTime(iso: string | null | undefined): string {
@@ -40,9 +48,9 @@ function formatDateTime(iso: string | null | undefined): string {
 export default async function MyPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; ok?: string }>;
+  searchParams: Promise<{ error?: string; ok?: string; verify_email?: string }>;
 }) {
-  const { error, ok } = await searchParams;
+  const { error, ok, verify_email } = await searchParams;
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 
@@ -95,6 +103,50 @@ export default async function MyPage({
             保存
           </button>
         </form>
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>メールアドレス変更</h2>
+        {verify_email ? (
+          <form action={confirmEmailChange}>
+            <p className={styles.note}>
+              新しいメールアドレス（{verify_email}）宛に確認コードを送信しました。届いたコードを入力してください。
+            </p>
+            <input type="hidden" name="new_email" value={verify_email} />
+            <label className={styles.field}>
+              <span className={styles.fieldLabel}>確認コード</span>
+              <input
+                name="code"
+                required
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                className={styles.input}
+              />
+            </label>
+            <button type="submit" className={styles.submit} style={{ marginTop: "0.75rem" }}>
+              確認して変更
+            </button>
+          </form>
+        ) : (
+          <form action={requestEmailChange}>
+            <p className={styles.note}>
+              変更すると新しいアドレスに確認コードが届きます。コードの入力が完了するまで現在のアドレスでログインできます。
+            </p>
+            <label className={styles.field}>
+              <span className={styles.fieldLabel}>新しいメールアドレス</span>
+              <input
+                name="new_email"
+                type="email"
+                required
+                autoComplete="email"
+                className={styles.input}
+              />
+            </label>
+            <button type="submit" className={styles.submit} style={{ marginTop: "0.75rem" }}>
+              確認コードを送信
+            </button>
+          </form>
+        )}
       </section>
 
       <section className={styles.section}>

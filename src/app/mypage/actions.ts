@@ -6,12 +6,17 @@ import { eq } from "drizzle-orm";
 import {
   getCurrentUser,
   getAccessToken,
+  getRefreshToken,
+  setIdAndAccess,
   clearSession,
 } from "@/lib/auth/session";
 import {
   login,
+  refresh,
   changePassword as cognitoChangePassword,
   deleteOwnUser,
+  requestEmailUpdate,
+  verifyEmailUpdate,
 } from "@/lib/auth/cognito";
 import { withUser } from "@/db/client";
 import { users } from "@/db/schema";
@@ -56,6 +61,68 @@ export async function changePassword(formData: FormData) {
   }
 
   back("ok=password-updated");
+}
+
+export async function requestEmailChange(formData: FormData) {
+  const newEmail = String(formData.get("new_email") ?? "").trim().toLowerCase();
+  if (!newEmail || !newEmail.includes("@")) back("error=email-invalid");
+
+  const accessToken = await getAccessToken();
+  if (!accessToken) redirect("/login");
+
+  // Cognito が新メールへ確認コードを送る。検証完了まで旧メールでもログイン可能。
+  try {
+    await requestEmailUpdate(accessToken, newEmail);
+  } catch (e) {
+    const name = (e as { name?: string }).name ?? "";
+    const msg =
+      name === "AliasExistsException"
+        ? "このメールアドレスは既に使われています。"
+        : name === "InvalidParameterException"
+          ? "メールアドレスの形式が正しくありません。"
+          : "メール変更の申請に失敗しました。時間をおいて再度お試しください。";
+    back(`error=${encodeURIComponent(msg)}`);
+  }
+
+  back(`verify_email=${encodeURIComponent(newEmail)}`);
+}
+
+export async function confirmEmailChange(formData: FormData) {
+  const newEmail = String(formData.get("new_email") ?? "").trim().toLowerCase();
+  const code = String(formData.get("code") ?? "").trim();
+
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
+  const accessToken = await getAccessToken();
+  if (!accessToken) redirect("/login");
+
+  // 新メールに届いたコードで確定。
+  try {
+    await verifyEmailUpdate(accessToken, code);
+  } catch {
+    back(
+      `verify_email=${encodeURIComponent(newEmail)}&error=${encodeURIComponent("確認コードが正しくありません。")}`,
+    );
+  }
+
+  // DB 側のメールも更新。
+  await withUser(user.sub, (tx) =>
+    tx.update(users).set({ email: newEmail }).where(eq(users.id, user.sub)),
+  );
+
+  // トークンを再発行して新メールを即時反映（失敗しても次回更新時に反映される）。
+  try {
+    const rt = await getRefreshToken();
+    if (rt) {
+      const t = await refresh(rt);
+      await setIdAndAccess(t.idToken, t.accessToken);
+    }
+  } catch {
+    // 反映は次回のトークン更新に委ねる
+  }
+
+  revalidatePath("/mypage");
+  back("ok=email-updated");
 }
 
 export async function deleteAccount(formData: FormData) {

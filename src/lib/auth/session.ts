@@ -58,3 +58,16 @@ export async function getAccessToken(): Promise<string | null> {
   const store = await cookies();
   return store.get(ACCESS_COOKIE)?.value ?? null;
 }
+
+// リフレッシュトークンを取得（トークン再発行に使う）。
+export async function getRefreshToken(): Promise<string | null> {
+  const store = await cookies();
+  return store.get(REFRESH_COOKIE)?.value ?? null;
+}
+
+// ID/アクセストークンだけ差し替える（リフレッシュ後の即時反映用。リフレッシュトークンは据え置き）。
+export async function setIdAndAccess(idToken: string, accessToken: string): Promise<void> {
+  const store = await cookies();
+  store.set(ID_COOKIE, idToken, baseCookie);
+  store.set(ACCESS_COOKIE, accessToken, baseCookie);
+}
