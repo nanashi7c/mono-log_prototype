@@ -1,29 +1,42 @@
-// Drizzle のクエリ結果（camelCase・timestamp は Date）を、
-// 既存 UI が前提とする types/item.ts の形（snake_case・文字列日時）へ変換する層。
-// これにより UI コンポーネント／型を一切変更せずにバックエンドだけ差し替えられる。
+// Prisma のクエリ結果（camelCase・BigInt/Decimal/Date）を、
+// 既存 UI / API が前提とする types/item.ts の形（snake_case・number・文字列日時）へ変換する層。
+// これにより UI コンポーネント／型・API レスポンス互換を保ったままバックエンドを差し替えられる。
 
-import type { InferSelectModel } from "drizzle-orm";
-import { items, categories, plans, listings } from "./schema";
+import { Prisma } from "@prisma/client";
+import type {
+  Item as ItemRow,
+  Category as CategoryRow,
+  Plan as PlanRow,
+  Listing as ListingRow,
+} from "@prisma/client";
 import type { Item, Category, Plan, Listing } from "@/types/item";
 
-type ItemRow = InferSelectModel<typeof items>;
-type CategoryRow = InferSelectModel<typeof categories>;
-type PlanRow = InferSelectModel<typeof plans>;
-type ListingRow = InferSelectModel<typeof listings>;
-
-// timestamptz は Date で返るため ISO 文字列へ。null 非許容の created_at/updated_at 用。
-function iso(v: Date | string): string {
-  return v instanceof Date ? v.toISOString() : v;
+// timestamptz(Date) → ISO 文字列
+function iso(d: Date): string {
+  return d.toISOString();
 }
-// deleted_at 等の null 許容用。
-function isoOrNull(v: Date | string | null): string | null {
-  if (v == null) return null;
-  return v instanceof Date ? v.toISOString() : v;
+function isoOrNull(d: Date | null): string | null {
+  return d == null ? null : d.toISOString();
+}
+// date 列(Date) → "YYYY-MM-DD"
+function ymdOrNull(d: Date | null): string | null {
+  return d == null ? null : d.toISOString().slice(0, 10);
+}
+// numeric(Decimal) → number。NextResponse.json は Decimal を素直に扱えないため number 化する。
+function decOrNull(d: Prisma.Decimal | null): number | null {
+  return d == null ? null : d.toNumber();
+}
+// bigint → number。NextResponse.json は BigInt で例外になるため number 化する。
+function bigToNum(b: bigint): number {
+  return Number(b);
+}
+function bigToNumOrNull(b: bigint | null): number | null {
+  return b == null ? null : Number(b);
 }
 
 export function toItem(r: ItemRow): Item {
   return {
-    id: r.id,
+    id: bigToNum(r.id),
     user_id: r.userId,
     status: r.status,
     name: r.name,
@@ -32,7 +45,7 @@ export function toItem(r: ItemRow): Item {
     quantity: r.quantity,
     notes: r.notes,
     actual_price: r.actualPrice,
-    purchased_at: r.purchasedAt, // date 列は "YYYY-MM-DD" 文字列で返る
+    purchased_at: ymdOrNull(r.purchasedAt), // date 列は "YYYY-MM-DD" で返す
     deleted_at: isoOrNull(r.deletedAt),
     created_at: iso(r.createdAt),
     updated_at: iso(r.updatedAt),
@@ -53,12 +66,12 @@ export function toCategory(r: CategoryRow): Category {
 
 export function toPlan(r: PlanRow): Plan {
   return {
-    id: r.id,
-    item_id: r.itemId,
+    id: bigToNum(r.id),
+    item_id: bigToNum(r.itemId),
     planned_purchase_year: r.plannedPurchaseYear,
     planned_purchase_month: r.plannedPurchaseMonth,
-    list_price: r.listPrice,
-    purchase_price: r.purchasePrice,
+    list_price: decOrNull(r.listPrice),
+    purchase_price: decOrNull(r.purchasePrice),
     product_url: r.productUrl,
     deal_period: r.dealPeriod,
     created_at: iso(r.createdAt),
@@ -68,19 +81,19 @@ export function toPlan(r: PlanRow): Plan {
 
 export function toListing(r: ListingRow): Listing {
   return {
-    id: r.id,
-    item_id: r.itemId,
-    shipping_id: r.shippingId,
+    id: bigToNum(r.id),
+    item_id: bigToNum(r.itemId),
+    shipping_id: bigToNumOrNull(r.shippingId),
     platform_id: r.platformId,
     quantity: r.quantity,
-    selling_price: r.sellingPrice,
-    packaging_cost: r.packagingCost,
-    work_time_hours: r.workTimeHours,
-    labor_rate: r.laborRate,
-    selling_fee: r.sellingFee,
-    work_time_cost: r.workTimeCost,
-    operating_benefit: r.operatingBenefit,
-    ordinary_profit: r.ordinaryProfit,
+    selling_price: decOrNull(r.sellingPrice),
+    packaging_cost: decOrNull(r.packagingCost),
+    work_time_hours: decOrNull(r.workTimeHours),
+    labor_rate: decOrNull(r.laborRate),
+    selling_fee: decOrNull(r.sellingFee),
+    work_time_cost: decOrNull(r.workTimeCost),
+    operating_benefit: decOrNull(r.operatingBenefit),
+    ordinary_profit: decOrNull(r.ordinaryProfit),
     is_listing: r.isListing,
     created_at: iso(r.createdAt),
     updated_at: iso(r.updatedAt),

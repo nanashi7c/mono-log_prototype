@@ -1,6 +1,4 @@
 // REST API(items) で使う検証・整形ロジック。route ハンドラ間で共有する。
-import { inArray } from "drizzle-orm";
-import { itemsCategories } from "@/db/schema";
 import type { Tx } from "@/db/client";
 import type { ItemStatus } from "@/types/item";
 
@@ -18,18 +16,19 @@ export type ItemInput = {
   categoryIds: number[];
 };
 
-// items に紐づくカテゴリ ID を item_id ごとにまとめて返す。
+// items に紐づくカテゴリ ID を item_id ごとにまとめて返す（item_id は number）。
 export async function categoryIdsByItem(tx: Tx, ids: number[]): Promise<Map<number, number[]>> {
   const map = new Map<number, number[]>();
   if (ids.length === 0) return map;
-  const links = await tx
-    .select({ itemId: itemsCategories.itemId, categoryId: itemsCategories.categoryId })
-    .from(itemsCategories)
-    .where(inArray(itemsCategories.itemId, ids));
+  const links = await tx.itemCategory.findMany({
+    where: { itemId: { in: ids.map((n) => BigInt(n)) } },
+    select: { itemId: true, categoryId: true },
+  });
   for (const l of links) {
-    const arr = map.get(l.itemId) ?? [];
+    const k = Number(l.itemId);
+    const arr = map.get(k) ?? [];
     arr.push(l.categoryId);
-    map.set(l.itemId, arr);
+    map.set(k, arr);
   }
   return map;
 }

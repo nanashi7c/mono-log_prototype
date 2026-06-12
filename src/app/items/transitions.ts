@@ -2,10 +2,8 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { eq } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import { items, listings } from "@/db/schema";
 
 async function authed() {
   const user = await getCurrentUser();
@@ -25,7 +23,7 @@ function revalidateItemViews() {
 export async function markAsPurchased(itemId: number) {
   const user = await authed();
   await withUser(user.sub, (tx) =>
-    tx.update(items).set({ status: "owned" }).where(eq(items.id, itemId)),
+    tx.item.updateMany({ where: { id: BigInt(itemId) }, data: { status: "owned" } }),
   );
   revalidateItemViews();
 }
@@ -33,10 +31,14 @@ export async function markAsPurchased(itemId: number) {
 // owned -> listed. 所有物一覧の「出品する」ボタン。listings 行を作成する。
 export async function listItem(itemId: number) {
   const user = await authed();
-  // listings.item_id は UNIQUE。既に行があれば重複 insert を無視する。
+  // listings.item_id は UNIQUE。既に行があれば作らない（重複作成を避ける）。
   await withUser(user.sub, async (tx) => {
-    await tx.insert(listings).values({ itemId }).onConflictDoNothing();
-    await tx.update(items).set({ status: "listed" }).where(eq(items.id, itemId));
+    const existing = await tx.listing.findUnique({
+      where: { itemId: BigInt(itemId) },
+      select: { itemId: true },
+    });
+    if (!existing) await tx.listing.create({ data: { itemId: BigInt(itemId) } });
+    await tx.item.updateMany({ where: { id: BigInt(itemId) }, data: { status: "listed" } });
   });
   revalidateItemViews();
 }
@@ -45,7 +47,7 @@ export async function listItem(itemId: number) {
 export async function restoreToPlanned(itemId: number) {
   const user = await authed();
   await withUser(user.sub, (tx) =>
-    tx.update(items).set({ status: "planned" }).where(eq(items.id, itemId)),
+    tx.item.updateMany({ where: { id: BigInt(itemId) }, data: { status: "planned" } }),
   );
   revalidateItemViews();
 }
@@ -54,10 +56,10 @@ export async function restoreToPlanned(itemId: number) {
 export async function markAsSold(itemId: number) {
   const user = await authed();
   await withUser(user.sub, (tx) =>
-    tx
-      .update(items)
-      .set({ status: "sold", deletedAt: new Date() })
-      .where(eq(items.id, itemId)),
+    tx.item.updateMany({
+      where: { id: BigInt(itemId) },
+      data: { status: "sold", deletedAt: new Date() },
+    }),
   );
   revalidateItemViews();
 }
@@ -66,8 +68,8 @@ export async function markAsSold(itemId: number) {
 export async function unlistItem(itemId: number) {
   const user = await authed();
   await withUser(user.sub, async (tx) => {
-    await tx.delete(listings).where(eq(listings.itemId, itemId));
-    await tx.update(items).set({ status: "owned" }).where(eq(items.id, itemId));
+    await tx.listing.deleteMany({ where: { itemId: BigInt(itemId) } });
+    await tx.item.updateMany({ where: { id: BigInt(itemId) }, data: { status: "owned" } });
   });
   revalidateItemViews();
 }

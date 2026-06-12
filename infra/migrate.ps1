@@ -13,9 +13,12 @@ $Prefix = "_deploy/migrations"
 # App bucket name (EC2 role can read objects from it).
 $Bucket = (& $aws ssm get-parameter --region $Region --name "/$Project/s3/bucket" --query Parameter.Value --output text)
 
+# RDS is private, so we apply the Prisma migration SQL files directly via psql on EC2
+# (prisma migrate deploy cannot reach the private RDS from here). The SQL is identical
+# to what `prisma migrate deploy` would run on a fresh local DB.
 Write-Host "== upload migration SQL to S3 =="
-& $aws s3 cp "$RepoRoot/migrations/0001_init.sql" "s3://$Bucket/$Prefix/0001_init.sql" --region $Region
-& $aws s3 cp "$RepoRoot/migrations/0002_seed.sql" "s3://$Bucket/$Prefix/0002_seed.sql" --region $Region
+& $aws s3 cp "$RepoRoot/prisma/migrations/20260613000000_init/migration.sql" "s3://$Bucket/$Prefix/0001_init.sql" --region $Region
+& $aws s3 cp "$RepoRoot/prisma/migrations/20260613000100_seed/migration.sql" "s3://$Bucket/$Prefix/0002_seed.sql" --region $Region
 
 Write-Host "== find EC2 instance =="
 $Instance = (& $aws ec2 describe-instances --region $Region `

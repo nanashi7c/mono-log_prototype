@@ -1,7 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { eq } from "drizzle-orm";
 import { withUser } from "@/db/client";
-import { items, itemsCategories } from "@/db/schema";
 import { toItem } from "@/db/serialize";
 import { deleteImage } from "@/lib/image";
 import { getApiUser, unauthorized, badRequest, jsonError, dbErrorResponse } from "@/lib/auth/api";
@@ -23,10 +21,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   try {
     const result = await withUser(user.sub, async (tx) => {
-      const rows = await tx.select().from(items).where(eq(items.id, id)).limit(1);
-      if (!rows[0]) return null;
+      const row = await tx.item.findFirst({ where: { id: BigInt(id) } });
+      if (!row) return null;
       const linkMap = await categoryIdsByItem(tx, [id]);
-      return { ...toItem(rows[0]), category_ids: linkMap.get(id) ?? [] };
+      return { ...toItem(row), category_ids: linkMap.get(id) ?? [] };
     });
     if (!result) return jsonError(404, "not found");
     return NextResponse.json({ item: result });
@@ -54,29 +52,31 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   try {
     const result = await withUser(user.sub, async (tx) => {
-      const updated = await tx
-        .update(items)
-        .set({
+      // RLS で他人の行は見えない。存在確認してから更新する。
+      const exists = await tx.item.findFirst({ where: { id: BigInt(id) }, select: { id: true } });
+      if (!exists) return null;
+
+      const row = await tx.item.update({
+        where: { id: BigInt(id) },
+        data: {
           status: v.status,
           name: v.name,
           janCode: v.janCode,
           quantity: v.quantity,
           notes: v.notes,
           actualPrice: v.actualPrice,
-          purchasedAt: v.purchasedAt,
-        })
-        .where(eq(items.id, id))
-        .returning();
-      if (!updated[0]) return null; // 対象なし（他人の行や存在しない id）
+          purchasedAt: v.purchasedAt ? new Date(v.purchasedAt) : null,
+        },
+      });
 
       // カテゴリは置換方式（現行を削除して入れ直す）。
-      await tx.delete(itemsCategories).where(eq(itemsCategories.itemId, id));
+      await tx.itemCategory.deleteMany({ where: { itemId: BigInt(id) } });
       if (v.categoryIds.length > 0) {
-        await tx
-          .insert(itemsCategories)
-          .values(v.categoryIds.map((cid) => ({ itemId: id, categoryId: cid })));
+        await tx.itemCategory.createMany({
+          data: v.categoryIds.map((cid) => ({ itemId: BigInt(id), categoryId: cid })),
+        });
       }
-      return { ...toItem(updated[0]), category_ids: v.categoryIds };
+      return { ...toItem(row), category_ids: v.categoryIds };
     });
     if (!result) return jsonError(404, "not found");
     return NextResponse.json({ item: result });
@@ -94,14 +94,13 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
 
   try {
     const deleted = await withUser(user.sub, async (tx) => {
-      const rows = await tx
-        .select({ imageUrl: items.imageUrl })
-        .from(items)
-        .where(eq(items.id, id))
-        .limit(1);
-      if (!rows[0]) return false;
-      if (rows[0].imageUrl) await deleteImage(rows[0].imageUrl);
-      await tx.delete(items).where(eq(items.id, id));
+      const row = await tx.item.findFirst({
+        where: { id: BigInt(id) },
+        select: { imageUrl: true },
+      });
+      if (!row) return false;
+      if (row.imageUrl) await deleteImage(row.imageUrl);
+      await tx.item.deleteMany({ where: { id: BigInt(id) } });
       return true;
     });
     if (!deleted) return jsonError(404, "not found");

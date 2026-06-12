@@ -1,9 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { and, eq, isNull, desc, inArray } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import { items, plans, categories, itemsCategories } from "@/db/schema";
 import { toItem, toPlan } from "@/db/serialize";
 import { formatYen } from "@/lib/format";
 import { markAsPurchased } from "../transitions";
@@ -29,40 +27,34 @@ export default async function PlannedItemsPage() {
   if (!user) redirect("/login");
 
   const rows: Row[] = await withUser(user.sub, async (tx) => {
-    const itemRows = await tx
-      .select()
-      .from(items)
-      .where(and(eq(items.status, "planned"), isNull(items.deletedAt)))
-      .orderBy(desc(items.createdAt));
+    const itemRows = await tx.item.findMany({
+      where: { status: "planned", deletedAt: null },
+      orderBy: { createdAt: "desc" },
+    });
 
     const ids = itemRows.map((r) => r.id);
     const planMap = new Map<number, Plan>();
     const catMap = new Map<number, Pick<Category, "id" | "name" | "color">[]>();
     if (ids.length > 0) {
-      const planRows = await tx.select().from(plans).where(inArray(plans.itemId, ids));
-      for (const p of planRows) planMap.set(p.itemId, toPlan(p));
+      const planRows = await tx.plan.findMany({ where: { itemId: { in: ids } } });
+      for (const p of planRows) planMap.set(Number(p.itemId), toPlan(p));
 
-      const links = await tx
-        .select({
-          itemId: itemsCategories.itemId,
-          id: categories.id,
-          name: categories.name,
-          color: categories.color,
-        })
-        .from(itemsCategories)
-        .innerJoin(categories, eq(itemsCategories.categoryId, categories.id))
-        .where(inArray(itemsCategories.itemId, ids));
+      const links = await tx.itemCategory.findMany({
+        where: { itemId: { in: ids } },
+        select: { itemId: true, category: { select: { id: true, name: true, color: true } } },
+      });
       for (const l of links) {
-        const arr = catMap.get(l.itemId) ?? [];
-        arr.push({ id: l.id, name: l.name, color: l.color });
-        catMap.set(l.itemId, arr);
+        const k = Number(l.itemId);
+        const arr = catMap.get(k) ?? [];
+        arr.push({ id: l.category.id, name: l.category.name, color: l.category.color });
+        catMap.set(k, arr);
       }
     }
 
     return itemRows.map((r) => ({
       ...toItem(r),
-      categories: catMap.get(r.id) ?? [],
-      plan: planMap.get(r.id) ?? null,
+      categories: catMap.get(Number(r.id)) ?? [],
+      plan: planMap.get(Number(r.id)) ?? null,
     }));
   });
 

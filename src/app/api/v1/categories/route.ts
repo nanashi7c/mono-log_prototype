@@ -1,7 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { and, eq } from "drizzle-orm";
 import { withUser } from "@/db/client";
-import { categories, users } from "@/db/schema";
 import { toCategory } from "@/db/serialize";
 import { getApiUser, unauthorized, badRequest, dbErrorResponse } from "@/lib/auth/api";
 
@@ -14,7 +12,7 @@ export async function GET(req: NextRequest) {
 
   try {
     const result = await withUser(user.sub, async (tx) => {
-      const rows = await tx.select().from(categories);
+      const rows = await tx.category.findMany();
       return rows.map(toCategory);
     });
     return NextResponse.json({ categories: result });
@@ -45,25 +43,19 @@ export async function POST(req: NextRequest) {
   try {
     const { category, created } = await withUser(user.sub, async (tx) => {
       // FK(categories.user_id → users.id)のため users 行を保証する。
-      await tx
-        .insert(users)
-        .values({ id: user.sub, email: user.email, username: user.email.split("@")[0] })
-        .onConflictDoNothing();
+      await tx.user.upsert({
+        where: { id: user.sub },
+        update: {},
+        create: { id: user.sub, email: user.email, username: user.email.split("@")[0] },
+      });
 
-      const inserted = await tx
-        .insert(categories)
-        .values({ userId: user.sub, name, ...(color ? { color } : {}) })
-        .onConflictDoNothing()
-        .returning();
-      if (inserted[0]) return { category: toCategory(inserted[0]), created: true };
-
-      // 同名(user_id, name)が既存 → それを返す。
-      const found = await tx
-        .select()
-        .from(categories)
-        .where(and(eq(categories.userId, user.sub), eq(categories.name, name)))
-        .limit(1);
-      return { category: toCategory(found[0]), created: false };
+      // 同名(user_id, name)が既にあればそれを返す。無ければ作成。
+      const existing = await tx.category.findFirst({ where: { userId: user.sub, name } });
+      if (existing) return { category: toCategory(existing), created: false };
+      const row = await tx.category.create({
+        data: { userId: user.sub, name, ...(color ? { color } : {}) },
+      });
+      return { category: toCategory(row), created: true };
     });
     return NextResponse.json({ category }, { status: created ? 201 : 200 });
   } catch (e) {

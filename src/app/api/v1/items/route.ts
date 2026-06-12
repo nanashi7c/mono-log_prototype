@@ -1,7 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { and, eq, isNull } from "drizzle-orm";
 import { withUser } from "@/db/client";
-import { items, itemsCategories, users } from "@/db/schema";
 import { toItem } from "@/db/serialize";
 import { getApiUser, unauthorized, badRequest, dbErrorResponse } from "@/lib/auth/api";
 import { ITEM_STATUSES, categoryIdsByItem, parseItemBody } from "@/lib/api/items";
@@ -22,11 +20,11 @@ export async function GET(req: NextRequest) {
 
   try {
     const result = await withUser(user.sub, async (tx) => {
-      const conds = [isNull(items.deletedAt)];
-      if (status) conds.push(eq(items.status, status));
-      const rows = await tx.select().from(items).where(and(...conds));
-      const linkMap = await categoryIdsByItem(tx, rows.map((r) => r.id));
-      return rows.map((r) => ({ ...toItem(r), category_ids: linkMap.get(r.id) ?? [] }));
+      const rows = await tx.item.findMany({
+        where: { deletedAt: null, ...(status ? { status } : {}) },
+      });
+      const linkMap = await categoryIdsByItem(tx, rows.map((r) => Number(r.id)));
+      return rows.map((r) => ({ ...toItem(r), category_ids: linkMap.get(Number(r.id)) ?? [] }));
     });
     return NextResponse.json({ items: result });
   } catch (e) {
@@ -52,14 +50,14 @@ export async function POST(req: NextRequest) {
   try {
     const created = await withUser(user.sub, async (tx) => {
       // FK(items.user_id → users.id)のため users 行を保証してから挿入する。
-      await tx
-        .insert(users)
-        .values({ id: user.sub, email: user.email, username: user.email.split("@")[0] })
-        .onConflictDoNothing();
+      await tx.user.upsert({
+        where: { id: user.sub },
+        update: {},
+        create: { id: user.sub, email: user.email, username: user.email.split("@")[0] },
+      });
 
-      const inserted = await tx
-        .insert(items)
-        .values({
+      const row = await tx.item.create({
+        data: {
           userId: user.sub,
           status: v.status,
           name: v.name,
@@ -67,15 +65,14 @@ export async function POST(req: NextRequest) {
           quantity: v.quantity,
           notes: v.notes,
           actualPrice: v.actualPrice,
-          purchasedAt: v.purchasedAt,
-        })
-        .returning();
-      const row = inserted[0];
+          purchasedAt: v.purchasedAt ? new Date(v.purchasedAt) : null,
+        },
+      });
 
       if (v.categoryIds.length > 0) {
-        await tx
-          .insert(itemsCategories)
-          .values(v.categoryIds.map((cid) => ({ itemId: row.id, categoryId: cid })));
+        await tx.itemCategory.createMany({
+          data: v.categoryIds.map((cid) => ({ itemId: row.id, categoryId: cid })),
+        });
       }
       return { ...toItem(row), category_ids: v.categoryIds };
     });

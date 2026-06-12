@@ -9,7 +9,6 @@ import {
 } from "@/lib/auth/cognito";
 import { setSession, clearSession } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import { users } from "@/db/schema";
 
 // サインアップ → 確認コード入力ページへ
 export async function signupAction(formData: FormData) {
@@ -59,14 +58,11 @@ export async function loginAction(formData: FormData) {
     const sub = payload.sub;
     const userEmail = payload.email as string;
     await withUser(sub, async (tx) => {
-      await tx
-        .insert(users)
-        .values({
-          id: sub,
-          email: userEmail,
-          username: userEmail.split("@")[0],
-        })
-        .onConflictDoNothing();
+      await tx.user.upsert({
+        where: { id: sub },
+        update: {},
+        create: { id: sub, email: userEmail, username: userEmail.split("@")[0] },
+      });
     });
 
     // users 行が確保できてからセッション Cookie を発行する。

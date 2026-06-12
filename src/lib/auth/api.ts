@@ -30,10 +30,11 @@ export function badRequest(message: string): NextResponse {
   return jsonError(400, message);
 }
 
-// DB 例外を適切な HTTP に振り分ける。整合性制約(23xxx)は 400、その他は 500。
+// DB 例外を適切な HTTP に振り分ける。Prisma の既知エラー(P2xxx: 一意/FK/制約等)は
+// クライアント起因が多いので 400、その他は 500。
 export function dbErrorResponse(e: unknown): NextResponse {
   const code = (e as { code?: string }).code;
-  if (typeof code === "string" && code.startsWith("23")) {
+  if (typeof code === "string" && /^P2\d{3}$/.test(code)) {
     return jsonError(400, (e as Error).message);
   }
   console.error(e);

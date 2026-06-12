@@ -1,8 +1,6 @@
 import { redirect } from "next/navigation";
-import { asc } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import { categories, platforms, services, sizes } from "@/db/schema";
 import ItemForm from "@/components/item-form";
 import { createItem } from "../actions";
 
@@ -18,22 +16,26 @@ export default async function NewItemPage({
   if (!user) redirect("/login");
 
   const data = await withUser(user.sub, async (tx) => {
-    const cats = await tx
-      .select({ id: categories.id, name: categories.name, color: categories.color })
-      .from(categories)
-      .orderBy(asc(categories.name));
-    const plats = await tx
-      .select({ id: platforms.id, name: platforms.name })
-      .from(platforms)
-      .orderBy(asc(platforms.name));
-    const svcs = await tx
-      .select({ id: services.id, shipping_service: services.shippingService })
-      .from(services)
-      .orderBy(asc(services.shippingService));
-    const szs = await tx
-      .select({ id: sizes.id, shipping_size: sizes.shippingSize })
-      .from(sizes)
-      .orderBy(asc(sizes.shippingSize));
+    const cats = await tx.category.findMany({
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, color: true },
+    });
+    const plats = await tx.platform.findMany({
+      orderBy: { name: "asc" },
+      select: { id: true, name: true },
+    });
+    const svcs = (
+      await tx.service.findMany({
+        orderBy: { shippingService: "asc" },
+        select: { id: true, shippingService: true },
+      })
+    ).map((s) => ({ id: s.id, shipping_service: s.shippingService }));
+    const szs = (
+      await tx.size.findMany({
+        orderBy: { shippingSize: "asc" },
+        select: { id: true, shippingSize: true },
+      })
+    ).map((s) => ({ id: s.id, shipping_size: s.shippingSize }));
     return { cats, plats, svcs, szs };
   });
 

@@ -1,18 +1,6 @@
 import { notFound, redirect } from "next/navigation";
-import { asc, eq } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import {
-  items,
-  plans,
-  listings,
-  itemsCategories,
-  categories,
-  platforms,
-  services,
-  sizes,
-  shipping,
-} from "@/db/schema";
 import { toItem, toPlan, toListing } from "@/db/serialize";
 import { signedImageUrl } from "@/lib/image";
 import ItemForm from "@/components/item-form";
@@ -38,53 +26,53 @@ export default async function EditItemPage({
   if (!user) redirect("/login");
 
   const result = await withUser(user.sub, async (tx) => {
-    const itemRows = await tx.select().from(items).where(eq(items.id, itemId)).limit(1);
-    if (!itemRows[0]) return null;
-    const item: Item = toItem(itemRows[0]);
+    const itemRow = await tx.item.findFirst({ where: { id: BigInt(itemId) } });
+    if (!itemRow) return null;
+    const item: Item = toItem(itemRow);
 
-    const planRows = await tx.select().from(plans).where(eq(plans.itemId, itemId)).limit(1);
-    const plan: Plan | null = planRows[0] ? toPlan(planRows[0]) : null;
+    const planRow = await tx.plan.findUnique({ where: { itemId: BigInt(itemId) } });
+    const plan: Plan | null = planRow ? toPlan(planRow) : null;
 
-    const listingRows = await tx.select().from(listings).where(eq(listings.itemId, itemId)).limit(1);
-    const listing: Listing | null = listingRows[0] ? toListing(listingRows[0]) : null;
+    const listingRow = await tx.listing.findUnique({ where: { itemId: BigInt(itemId) } });
+    const listing: Listing | null = listingRow ? toListing(listingRow) : null;
 
-    const links = await tx
-      .select({ categoryId: itemsCategories.categoryId })
-      .from(itemsCategories)
-      .where(eq(itemsCategories.itemId, itemId));
+    const links = await tx.itemCategory.findMany({
+      where: { itemId: BigInt(itemId) },
+      select: { categoryId: true },
+    });
     const selectedCategoryIds = links.map((r) => r.categoryId);
 
-    const cats = await tx
-      .select({ id: categories.id, name: categories.name, color: categories.color })
-      .from(categories)
-      .orderBy(asc(categories.name));
-    const plats = await tx
-      .select({ id: platforms.id, name: platforms.name })
-      .from(platforms)
-      .orderBy(asc(platforms.name));
-    const svcs = await tx
-      .select({ id: services.id, shipping_service: services.shippingService })
-      .from(services)
-      .orderBy(asc(services.shippingService));
-    const szs = await tx
-      .select({ id: sizes.id, shipping_size: sizes.shippingSize })
-      .from(sizes)
-      .orderBy(asc(sizes.shippingSize));
+    const cats = await tx.category.findMany({
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, color: true },
+    });
+    const plats = await tx.platform.findMany({
+      orderBy: { name: "asc" },
+      select: { id: true, name: true },
+    });
+    const svcs = (
+      await tx.service.findMany({
+        orderBy: { shippingService: "asc" },
+        select: { id: true, shippingService: true },
+      })
+    ).map((s) => ({ id: s.id, shipping_service: s.shippingService }));
+    const szs = (
+      await tx.size.findMany({
+        orderBy: { shippingSize: "asc" },
+        select: { id: true, shippingSize: true },
+      })
+    ).map((s) => ({ id: s.id, shipping_size: s.shippingSize }));
 
     // listings の shipping_id 参照からフォーム初期値の service/size を解決する。
     let initialServiceId: number | null = null;
     let initialSizeId: number | null = null;
     if (listing?.shipping_id != null) {
-      const sh = await tx
-        .select({
-          serviceId: shipping.shippingServiceId,
-          sizeId: shipping.shippingSizeId,
-        })
-        .from(shipping)
-        .where(eq(shipping.id, listing.shipping_id))
-        .limit(1);
-      initialServiceId = sh[0]?.serviceId ?? null;
-      initialSizeId = sh[0]?.sizeId ?? null;
+      const sh = await tx.shipping.findUnique({
+        where: { id: BigInt(listing.shipping_id) },
+        select: { shippingServiceId: true, shippingSizeId: true },
+      });
+      initialServiceId = sh?.shippingServiceId ?? null;
+      initialSizeId = sh?.shippingSizeId ?? null;
     }
 
     return {

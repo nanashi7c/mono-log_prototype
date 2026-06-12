@@ -1,21 +1,8 @@
 import Image from "next/image";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
-import { and, eq } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import {
-  items,
-  plans,
-  listings,
-  itemsCategories,
-  categories as categoriesTable,
-  platforms,
-  shipping,
-  services,
-  sizes,
-  shippingFees,
-} from "@/db/schema";
 import { toItem, toPlan, toListing } from "@/db/serialize";
 import { signedImageUrl } from "@/lib/image";
 import { formatDate, formatYen } from "@/lib/format";
@@ -57,25 +44,25 @@ export default async function ItemDetailPage({
   if (!user) redirect("/login");
 
   const result = await withUser(user.sub, async (tx) => {
-    const itemRows = await tx.select().from(items).where(eq(items.id, itemId)).limit(1);
-    if (!itemRows[0]) return null;
-    const item = toItem(itemRows[0]);
+    const itemRow = await tx.item.findFirst({ where: { id: BigInt(itemId) } });
+    if (!itemRow) return null;
+    const item = toItem(itemRow);
 
-    const planRows = await tx.select().from(plans).where(eq(plans.itemId, itemId)).limit(1);
-    const plan = planRows[0] ? toPlan(planRows[0]) : null;
+    const planRow = await tx.plan.findUnique({ where: { itemId: BigInt(itemId) } });
+    const plan = planRow ? toPlan(planRow) : null;
 
-    const listingRows = await tx.select().from(listings).where(eq(listings.itemId, itemId)).limit(1);
-    const listing = listingRows[0] ? toListing(listingRows[0]) : null;
+    const listingRow = await tx.listing.findUnique({ where: { itemId: BigInt(itemId) } });
+    const listing = listingRow ? toListing(listingRow) : null;
 
-    const categories = await tx
-      .select({
-        id: categoriesTable.id,
-        name: categoriesTable.name,
-        color: categoriesTable.color,
-      })
-      .from(itemsCategories)
-      .innerJoin(categoriesTable, eq(itemsCategories.categoryId, categoriesTable.id))
-      .where(eq(itemsCategories.itemId, itemId));
+    const links = await tx.itemCategory.findMany({
+      where: { itemId: BigInt(itemId) },
+      select: { category: { select: { id: true, name: true, color: true } } },
+    });
+    const categories = links.map((l) => ({
+      id: l.category.id,
+      name: l.category.name,
+      color: l.category.color,
+    }));
 
     let platform: Pick<Platform, "id" | "name"> | null = null;
     let service: Pick<Service, "id" | "shipping_service"> | null = null;
@@ -83,46 +70,37 @@ export default async function ItemDetailPage({
     let shippingFee: number | null = null;
     if (listing) {
       if (listing.platform_id != null) {
-        const p = await tx
-          .select({ id: platforms.id, name: platforms.name })
-          .from(platforms)
-          .where(eq(platforms.id, listing.platform_id))
-          .limit(1);
-        platform = p[0] ?? null;
+        platform = await tx.platform.findUnique({
+          where: { id: listing.platform_id },
+          select: { id: true, name: true },
+        });
       }
       if (listing.shipping_id != null) {
-        const sh = await tx
-          .select({
-            serviceId: shipping.shippingServiceId,
-            sizeId: shipping.shippingSizeId,
-          })
-          .from(shipping)
-          .where(eq(shipping.id, listing.shipping_id))
-          .limit(1);
-        if (sh[0]) {
-          const svc = await tx
-            .select({ id: services.id, shipping_service: services.shippingService })
-            .from(services)
-            .where(eq(services.id, sh[0].serviceId))
-            .limit(1);
-          const sz = await tx
-            .select({ id: sizes.id, shipping_size: sizes.shippingSize })
-            .from(sizes)
-            .where(eq(sizes.id, sh[0].sizeId))
-            .limit(1);
-          const fee = await tx
-            .select({ fee: shippingFees.fee })
-            .from(shippingFees)
-            .where(
-              and(
-                eq(shippingFees.shippingServiceId, sh[0].serviceId),
-                eq(shippingFees.shippingSizeId, sh[0].sizeId),
-              ),
-            )
-            .limit(1);
-          service = svc[0] ?? null;
-          size = sz[0] ?? null;
-          shippingFee = fee[0]?.fee ?? null;
+        const sh = await tx.shipping.findUnique({
+          where: { id: BigInt(listing.shipping_id) },
+          select: { shippingServiceId: true, shippingSizeId: true },
+        });
+        if (sh) {
+          const svc = await tx.service.findUnique({
+            where: { id: sh.shippingServiceId },
+            select: { id: true, shippingService: true },
+          });
+          const sz = await tx.size.findUnique({
+            where: { id: sh.shippingSizeId },
+            select: { id: true, shippingSize: true },
+          });
+          const fee = await tx.shippingFee.findUnique({
+            where: {
+              shippingServiceId_shippingSizeId: {
+                shippingServiceId: sh.shippingServiceId,
+                shippingSizeId: sh.shippingSizeId,
+              },
+            },
+            select: { fee: true },
+          });
+          service = svc ? { id: svc.id, shipping_service: svc.shippingService } : null;
+          size = sz ? { id: sz.id, shipping_size: sz.shippingSize } : null;
+          shippingFee = fee?.fee != null ? fee.fee.toNumber() : null;
         }
       }
     }

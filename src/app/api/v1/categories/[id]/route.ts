@@ -1,7 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { eq } from "drizzle-orm";
 import { withUser } from "@/db/client";
-import { categories } from "@/db/schema";
 import { getApiUser, unauthorized, badRequest, jsonError, dbErrorResponse } from "@/lib/auth/api";
 
 export const dynamic = "force-dynamic";
@@ -20,11 +18,8 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
 
   try {
     const deleted = await withUser(user.sub, async (tx) => {
-      const rows = await tx
-        .delete(categories)
-        .where(eq(categories.id, id))
-        .returning({ id: categories.id });
-      return rows.length > 0;
+      const res = await tx.category.deleteMany({ where: { id } });
+      return res.count > 0;
     });
     if (!deleted) return jsonError(404, "not found");
     return new NextResponse(null, { status: 204 });

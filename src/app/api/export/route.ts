@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
-import { eq, inArray } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import { items, categories, itemsCategories } from "@/db/schema";
 import { toItem, toCategory } from "@/db/serialize";
+import { categoryIdsByItem } from "@/lib/api/items";
 
 export const dynamic = "force-dynamic";
 
@@ -13,26 +12,15 @@ export async function GET() {
 
   const { exportedCategories, exportedItems } = await withUser(user.sub, async (tx) => {
     // 自分が作成したカテゴリのみ（プリセットは取り込み先に既に存在するため除外）。
-    const catRows = await tx.select().from(categories).where(eq(categories.userId, user.sub));
-    const itemRows = await tx.select().from(items);
-
-    const ids = itemRows.map((r) => r.id);
-    const linkMap = new Map<number, number[]>();
-    if (ids.length > 0) {
-      const links = await tx
-        .select({ itemId: itemsCategories.itemId, categoryId: itemsCategories.categoryId })
-        .from(itemsCategories)
-        .where(inArray(itemsCategories.itemId, ids));
-      for (const l of links) {
-        const arr = linkMap.get(l.itemId) ?? [];
-        arr.push(l.categoryId);
-        linkMap.set(l.itemId, arr);
-      }
-    }
-
+    const catRows = await tx.category.findMany({ where: { userId: user.sub } });
+    const itemRows = await tx.item.findMany();
+    const linkMap = await categoryIdsByItem(tx, itemRows.map((r) => Number(r.id)));
     return {
       exportedCategories: catRows.map(toCategory),
-      exportedItems: itemRows.map((r) => ({ ...toItem(r), category_ids: linkMap.get(r.id) ?? [] })),
+      exportedItems: itemRows.map((r) => ({
+        ...toItem(r),
+        category_ids: linkMap.get(Number(r.id)) ?? [],
+      })),
     };
   });
 

@@ -1,0 +1,192 @@
+// DDL（テーブル/RLS/ロール/トリガ/関数/seed）は prisma/migrations の手書きSQLが正。
+// このスキーマは Prisma Client のクエリ型として使う（イントロスペクション由来）。
+generator client {
+  provider      = "prisma-client-js"
+  // native: ローカル開発環境 / linux-musl-arm64: 本番Docker(node:22-alpine, t4g/ARM)
+  binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String     @id @db.Uuid
+  email     String     @unique
+  username  String
+  createdAt DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime   @default(now()) @map("updated_at") @db.Timestamptz(6)
+  categories Category[]
+  items      Item[]
+
+  @@map("users")
+}
+
+model Category {
+  id        Int      @id @default(autoincrement())
+  userId    String?  @map("user_id") @db.Uuid
+  name      String
+  color     String   @default("#94a3b8")
+  isPreset  Boolean  @default(false) @map("is_preset")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  user           User?          @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  itemCategories ItemCategory[]
+
+  @@unique([userId, name])
+  @@index([userId], map: "categories_user_idx")
+  @@map("categories")
+}
+
+model Item {
+  id          BigInt      @id @default(autoincrement())
+  userId      String      @map("user_id") @db.Uuid
+  status      ItemStatus
+  name        String      @db.VarChar(255)
+  imageUrl    String?     @map("image_url")
+  janCode     String?     @map("jan_code") @db.VarChar(13)
+  quantity    Int
+  notes       String?
+  actualPrice Int?        @map("actual_price")
+  purchasedAt DateTime?   @map("purchased_at") @db.Date
+  deletedAt   DateTime?   @map("deleted_at") @db.Timestamptz(6)
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime    @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  itemCategories ItemCategory[]
+  listing        Listing?
+  plan           Plan?
+
+  @@index([userId, status, createdAt(sort: Desc)], map: "items_user_status_idx")
+  @@map("items")
+}
+
+model ItemCategory {
+  itemId     BigInt   @map("item_id")
+  categoryId Int      @map("category_id")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  item     Item     @relation(fields: [itemId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([itemId, categoryId])
+  @@index([categoryId], map: "items_categories_category_idx")
+  @@map("items_categories")
+}
+
+model Plan {
+  id                   BigInt   @id @default(autoincrement())
+  itemId               BigInt   @unique @map("item_id")
+  plannedPurchaseYear  Int?     @map("planned_purchase_year") @db.SmallInt
+  plannedPurchaseMonth Int?     @map("planned_purchase_month") @db.SmallInt
+  listPrice            Decimal? @map("list_price") @db.Decimal(10, 0)
+  purchasePrice        Decimal? @map("purchase_price") @db.Decimal(10, 0)
+  productUrl           String?  @map("product_url")
+  dealPeriod           String?  @map("deal_period") @db.VarChar(255)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("plans")
+}
+
+model Platform {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  feeRate   Decimal  @map("fee_rate") @db.Decimal(5, 4)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  listings  Listing[]
+
+  @@map("platforms")
+}
+
+model Service {
+  id              Int           @id @default(autoincrement())
+  shippingService String        @unique @map("shipping_service")
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime      @default(now()) @map("updated_at") @db.Timestamptz(6)
+  shipping        Shipping[]
+  shippingFees    ShippingFee[]
+
+  @@map("services")
+}
+
+model Size {
+  id           Int           @id @default(autoincrement())
+  shippingSize String        @unique @map("shipping_size")
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime      @default(now()) @map("updated_at") @db.Timestamptz(6)
+  shipping     Shipping[]
+  shippingFees ShippingFee[]
+
+  @@map("sizes")
+}
+
+model Shipping {
+  id                BigInt   @id @default(autoincrement())
+  shippingServiceId Int      @map("shipping_service_id")
+  shippingSizeId    Int      @map("shipping_size_id")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  listings Listing[]
+  service  Service  @relation(fields: [shippingServiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  size     Size     @relation(fields: [shippingSizeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([shippingServiceId, shippingSizeId])
+  @@map("shipping")
+}
+
+model ShippingFee {
+  id                BigInt   @id @default(autoincrement())
+  shippingServiceId Int      @map("shipping_service_id")
+  shippingSizeId    Int      @map("shipping_size_id")
+  fee               Decimal  @db.Decimal(10, 0)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  service Service @relation(fields: [shippingServiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  size    Size    @relation(fields: [shippingSizeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([shippingServiceId, shippingSizeId])
+  @@map("shipping_fees")
+}
+
+model Listing {
+  id               BigInt   @id @default(autoincrement())
+  itemId           BigInt   @unique @map("item_id")
+  shippingId       BigInt?  @map("shipping_id")
+  platformId       Int?     @map("platform_id")
+  quantity         Int?
+  sellingPrice     Decimal? @map("selling_price") @db.Decimal(10, 0)
+  packagingCost    Decimal? @map("packaging_cost") @db.Decimal(10, 0)
+  workTimeHours    Decimal? @map("work_time_hours") @db.Decimal(8, 2)
+  laborRate        Decimal? @map("labor_rate") @db.Decimal(10, 0)
+  sellingFee       Decimal? @map("selling_fee") @db.Decimal(10, 0)
+  workTimeCost     Decimal? @map("work_time_cost") @db.Decimal(10, 0)
+  operatingBenefit Decimal? @map("operating_benefit") @db.Decimal(10, 0)
+  ordinaryProfit   Decimal? @map("ordinary_profit") @db.Decimal(10, 0)
+  isListing        Boolean? @map("is_listing")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  item     Item      @relation(fields: [itemId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  platform Platform? @relation(fields: [platformId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  shipping Shipping? @relation(fields: [shippingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("listings")
+}
+
+enum ItemStatus {
+  planned
+  owned
+  listed
+  sold
+
+  @@map("item_status")
+}

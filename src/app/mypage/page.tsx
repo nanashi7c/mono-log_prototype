@@ -1,9 +1,7 @@
 import { redirect } from "next/navigation";
-import { eq } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth/session";
 import { getUserCreatedAt } from "@/lib/auth/cognito";
 import { withUser } from "@/db/client";
-import { users } from "@/db/schema";
 import {
   changePassword,
   confirmEmailChange,
@@ -54,10 +52,10 @@ export default async function MyPage({
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 
-  const rows = await withUser(user.sub, (tx) =>
-    tx.select({ username: users.username }).from(users).where(eq(users.id, user.sub)).limit(1),
+  const profile = await withUser(user.sub, (tx) =>
+    tx.user.findUnique({ where: { id: user.sub }, select: { username: true } }),
   );
-  const username = rows[0]?.username ?? "";
+  const username = profile?.username ?? "";
   const createdAt = await getUserCreatedAt(user.email);
   const lastSignIn = user.authTime != null ? new Date(user.authTime * 1000).toISOString() : null;
   // 退会は Cognito のセルフサービスで常に可能。

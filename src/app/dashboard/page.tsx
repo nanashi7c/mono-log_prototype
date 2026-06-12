@@ -1,9 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { and, eq, isNull, inArray } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import { items, categories, itemsCategories } from "@/db/schema";
 import { formatYen } from "@/lib/format";
 import type { Category, Item } from "@/types/item";
 import styles from "./page.module.css";
@@ -28,36 +26,31 @@ export default async function DashboardPage() {
 
   // Active items only (exclude sold/logically-deleted).
   const items_: Row[] = await withUser(user.sub, async (tx) => {
-    const rows = await tx
-      .select({ id: items.id, actualPrice: items.actualPrice, status: items.status })
-      .from(items)
-      .where(and(inArray(items.status, ["owned", "listed"]), isNull(items.deletedAt)));
+    const rows = await tx.item.findMany({
+      where: { status: { in: ["owned", "listed"] }, deletedAt: null },
+      select: { id: true, actualPrice: true, status: true },
+    });
 
     const ids = rows.map((r) => r.id);
     const catMap = new Map<number, Pick<Category, "id" | "name" | "color">[]>();
     if (ids.length > 0) {
-      const links = await tx
-        .select({
-          itemId: itemsCategories.itemId,
-          id: categories.id,
-          name: categories.name,
-          color: categories.color,
-        })
-        .from(itemsCategories)
-        .innerJoin(categories, eq(itemsCategories.categoryId, categories.id))
-        .where(inArray(itemsCategories.itemId, ids));
+      const links = await tx.itemCategory.findMany({
+        where: { itemId: { in: ids } },
+        select: { itemId: true, category: { select: { id: true, name: true, color: true } } },
+      });
       for (const l of links) {
-        const arr = catMap.get(l.itemId) ?? [];
-        arr.push({ id: l.id, name: l.name, color: l.color });
-        catMap.set(l.itemId, arr);
+        const k = Number(l.itemId);
+        const arr = catMap.get(k) ?? [];
+        arr.push({ id: l.category.id, name: l.category.name, color: l.category.color });
+        catMap.set(k, arr);
       }
     }
 
     return rows.map((r) => ({
-      id: r.id,
+      id: Number(r.id),
       actual_price: r.actualPrice,
       status: r.status,
-      categories: catMap.get(r.id) ?? [],
+      categories: catMap.get(Number(r.id)) ?? [],
     }));
   });
 

@@ -1,20 +1,8 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import {
-  and,
-  or,
-  eq,
-  isNull,
-  ilike,
-  inArray,
-  notInArray,
-  asc,
-  desc,
-  type SQL,
-} from "drizzle-orm";
+import { Prisma } from "@prisma/client";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import { items, categories, itemsCategories } from "@/db/schema";
 import { toItem } from "@/db/serialize";
 import { signedImageUrl } from "@/lib/image";
 import ItemCard from "@/components/item-card";
@@ -37,71 +25,49 @@ export default async function OwnedItemsPage({
   if (!user) redirect("/login");
 
   const { list, categoryOptions } = await withUser(user.sub, async (tx) => {
-    const cats = await tx
-      .select({ id: categories.id, name: categories.name, color: categories.color })
-      .from(categories)
-      .orderBy(asc(categories.name));
+    const cats = await tx.category.findMany({
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, color: true },
+    });
 
-    const conds: SQL[] = [
-      inArray(items.status, ["owned", "listed"]),
-      isNull(items.deletedAt),
-    ];
-
+    // 検索・カテゴリ絞り込みはリレーションフィルタで一括表現する。
+    const where: Prisma.ItemWhereInput = {
+      status: { in: ["owned", "listed"] },
+      deletedAt: null,
+    };
     if (q && q.trim()) {
-      const term = `%${q.trim().replace(/[%_]/g, (m) => `\\${m}`)}%`;
-      conds.push(or(ilike(items.name, term), ilike(items.notes, term))!);
+      const term = q.trim();
+      where.OR = [
+        { name: { contains: term, mode: "insensitive" } },
+        { notes: { contains: term, mode: "insensitive" } },
+      ];
     }
-
-    // カテゴリ絞り込みは M:N。先に items_categories から対象 item ID を解決する。
     if (category === "__none__") {
-      const tagged = await tx
-        .selectDistinct({ itemId: itemsCategories.itemId })
-        .from(itemsCategories);
-      const taggedIds = tagged.map((r) => r.itemId);
-      if (taggedIds.length > 0) conds.push(notInArray(items.id, taggedIds));
+      where.itemCategories = { none: {} };
     } else if (category) {
-      const catId = Number(category);
-      const linked = await tx
-        .select({ itemId: itemsCategories.itemId })
-        .from(itemsCategories)
-        .where(eq(itemsCategories.categoryId, catId));
-      const ids = linked.map((r) => r.itemId);
-      if (ids.length === 0) {
-        return { list: [] as ItemWithCategories[], categoryOptions: cats };
-      }
-      conds.push(inArray(items.id, ids));
+      where.itemCategories = { some: { categoryId: Number(category) } };
     }
 
-    const rows = await tx
-      .select()
-      .from(items)
-      .where(and(...conds))
-      .orderBy(desc(items.createdAt));
+    const rows = await tx.item.findMany({ where, orderBy: { createdAt: "desc" } });
 
     // 各 item のカテゴリ（M:N）をまとめて取得する。
-    const itemIds = rows.map((r) => r.id);
     const catMap = new Map<number, Pick<Category, "id" | "name" | "color">[]>();
-    if (itemIds.length > 0) {
-      const links = await tx
-        .select({
-          itemId: itemsCategories.itemId,
-          id: categories.id,
-          name: categories.name,
-          color: categories.color,
-        })
-        .from(itemsCategories)
-        .innerJoin(categories, eq(itemsCategories.categoryId, categories.id))
-        .where(inArray(itemsCategories.itemId, itemIds));
+    if (rows.length > 0) {
+      const links = await tx.itemCategory.findMany({
+        where: { itemId: { in: rows.map((r) => r.id) } },
+        select: { itemId: true, category: { select: { id: true, name: true, color: true } } },
+      });
       for (const l of links) {
-        const arr = catMap.get(l.itemId) ?? [];
-        arr.push({ id: l.id, name: l.name, color: l.color });
-        catMap.set(l.itemId, arr);
+        const k = Number(l.itemId);
+        const arr = catMap.get(k) ?? [];
+        arr.push({ id: l.category.id, name: l.category.name, color: l.category.color });
+        catMap.set(k, arr);
       }
     }
 
     const list: ItemWithCategories[] = rows.map((r) => ({
       ...toItem(r),
-      categories: catMap.get(r.id) ?? [],
+      categories: catMap.get(Number(r.id)) ?? [],
     }));
     return { list, categoryOptions: cats };
   });

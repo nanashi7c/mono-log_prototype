@@ -2,10 +2,8 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import { items, categories, itemsCategories } from "@/db/schema";
 import type { ItemStatus } from "@/types/item";
 
 const STATUSES: ItemStatus[] = ["planned", "owned", "listed", "sold"];
@@ -69,9 +67,7 @@ export async function importBackup(formData: FormData) {
       // 旧カテゴリ id → 新カテゴリ id の対応表。
       const idMap = new Map<string, number>();
       // unique(user_id, name) 衝突を避けるため、既存カテゴリを名前で索引する。
-      const existing = await tx
-        .select({ id: categories.id, name: categories.name })
-        .from(categories);
+      const existing = await tx.category.findMany({ select: { id: true, name: true } });
       const byName = new Map<string, number>();
       for (const c of existing) byName.set(c.name, c.id);
 
@@ -80,17 +76,19 @@ export async function importBackup(formData: FormData) {
         if (!name) continue;
         let newId = byName.get(name);
         if (newId == null) {
-          await tx
-            .insert(categories)
-            .values({ userId: user.sub, name, color: asString(c.color) ?? "#94a3b8" })
-            .onConflictDoNothing();
-          const found = await tx
-            .select({ id: categories.id })
-            .from(categories)
-            .where(and(eq(categories.userId, user.sub), eq(categories.name, name)))
-            .limit(1);
-          newId = found[0]?.id;
-          if (newId != null) byName.set(name, newId);
+          const found = await tx.category.findFirst({
+            where: { userId: user.sub, name },
+            select: { id: true },
+          });
+          newId =
+            found?.id ??
+            (
+              await tx.category.create({
+                data: { userId: user.sub, name, color: asString(c.color) ?? "#94a3b8" },
+                select: { id: true },
+              })
+            ).id;
+          byName.set(name, newId);
         }
         if (c.id != null && newId != null) idMap.set(String(c.id), newId);
       }
@@ -103,9 +101,9 @@ export async function importBackup(formData: FormData) {
         const status: ItemStatus = (STATUSES as string[]).includes(statusRaw)
           ? (statusRaw as ItemStatus)
           : "owned";
-        const ins = await tx
-          .insert(items)
-          .values({
+        const purchased = asString(it.purchased_at);
+        const row = await tx.item.create({
+          data: {
             userId: user.sub,
             status,
             name,
@@ -113,10 +111,10 @@ export async function importBackup(formData: FormData) {
             quantity: asPosInt(it.quantity) ?? 1,
             notes: asString(it.notes),
             actualPrice: asNonNegInt(it.actual_price),
-            purchasedAt: asString(it.purchased_at),
-          })
-          .returning({ id: items.id });
-        const itemId = ins[0].id;
+            purchasedAt: purchased ? new Date(purchased) : null,
+          },
+          select: { id: true },
+        });
 
         const cids = Array.isArray(it.category_ids)
           ? it.category_ids
@@ -124,7 +122,9 @@ export async function importBackup(formData: FormData) {
               .filter((x): x is number => x != null)
           : [];
         if (cids.length > 0) {
-          await tx.insert(itemsCategories).values(cids.map((cid) => ({ itemId, categoryId: cid })));
+          await tx.itemCategory.createMany({
+            data: cids.map((cid) => ({ itemId: row.id, categoryId: cid })),
+          });
         }
         count++;
       }

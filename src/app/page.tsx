@@ -1,8 +1,6 @@
 import Link from "next/link";
-import { and, eq, isNull, inArray, count } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import { items } from "@/db/schema";
 import styles from "./page.module.css";
 
 export const dynamic = "force-dynamic";
@@ -13,19 +11,12 @@ export default async function LandingPage() {
 
   // Counts for the four navigation cards.
   const { owned, planned, listed } = await withUser(user.sub, async (tx) => {
-    const ownedRes = await tx
-      .select({ c: count() })
-      .from(items)
-      .where(and(inArray(items.status, ["owned", "listed"]), isNull(items.deletedAt)));
-    const plannedRes = await tx
-      .select({ c: count() })
-      .from(items)
-      .where(and(eq(items.status, "planned"), isNull(items.deletedAt)));
-    const listedRes = await tx
-      .select({ c: count() })
-      .from(items)
-      .where(and(eq(items.status, "listed"), isNull(items.deletedAt)));
-    return { owned: ownedRes[0].c, planned: plannedRes[0].c, listed: listedRes[0].c };
+    const owned = await tx.item.count({
+      where: { status: { in: ["owned", "listed"] }, deletedAt: null },
+    });
+    const planned = await tx.item.count({ where: { status: "planned", deletedAt: null } });
+    const listed = await tx.item.count({ where: { status: "listed", deletedAt: null } });
+    return { owned, planned, listed };
   });
 
   const username = user.email?.split("@")[0] ?? "";

@@ -2,7 +2,6 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { eq } from "drizzle-orm";
 import {
   getCurrentUser,
   getAccessToken,
@@ -19,7 +18,6 @@ import {
   verifyEmailUpdate,
 } from "@/lib/auth/cognito";
 import { withUser } from "@/db/client";
-import { users } from "@/db/schema";
 
 function back(qs: string): never {
   redirect(`/mypage?${qs}`);
@@ -33,7 +31,7 @@ export async function updateProfile(formData: FormData) {
   if (!user) redirect("/login");
 
   await withUser(user.sub, (tx) =>
-    tx.update(users).set({ username }).where(eq(users.id, user.sub)),
+    tx.user.updateMany({ where: { id: user.sub }, data: { username } }),
   );
 
   revalidatePath("/mypage");
@@ -107,7 +105,7 @@ export async function confirmEmailChange(formData: FormData) {
 
   // DB 側のメールも更新。
   await withUser(user.sub, (tx) =>
-    tx.update(users).set({ email: newEmail }).where(eq(users.id, user.sub)),
+    tx.user.updateMany({ where: { id: user.sub }, data: { email: newEmail } }),
   );
 
   // トークンを再発行して新メールを即時反映（失敗しても次回更新時に反映される）。
@@ -145,7 +143,7 @@ export async function deleteAccount(formData: FormData) {
   if (!accessToken) redirect("/login");
 
   // 先に DB の users 行を削除（items 等は FK の ON DELETE CASCADE で消える）。
-  await withUser(user.sub, (tx) => tx.delete(users).where(eq(users.id, user.sub)));
+  await withUser(user.sub, (tx) => tx.user.deleteMany({ where: { id: user.sub } }));
 
   // Cognito 上のユーザも削除（セルフサービス）。
   try {
