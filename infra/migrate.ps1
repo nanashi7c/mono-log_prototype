@@ -1,7 +1,7 @@
-# RDS への初回マイグレーション（0001_init.sql / 0002_seed.sql）＋ monolog_app パスワード設定。
-# RDS は非公開のため、SQL を S3 経由で EC2 に渡し、SSM 経由で EC2 上から psql を実行する。
-# 前提: terraform apply 済み（RDS/EC2 が起動）。RDS 再作成のたびに1回実行する。
-# 使い方: infra/ で  powershell -File migrate.ps1
+# First-time DB migration to RDS (0001_init.sql / 0002_seed.sql) + set monolog_app password.
+# RDS is private, so SQL is shipped to EC2 via S3 and applied from EC2 over SSM (psql in a container).
+# Prereq: terraform apply done (RDS/EC2 running). Run once per RDS (re)creation.
+# Usage (from infra/):  powershell -ExecutionPolicy Bypass -File migrate.ps1
 
 $ErrorActionPreference = "Stop"
 $aws = "C:\Program Files\Amazon\AWSCLIV2\aws.exe"
@@ -10,23 +10,24 @@ $Project = "mono-log"
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 $Prefix = "_deploy/migrations"
 
-# アプリ用バケット名（EC2 がこのバケットから SQL を取得できる権限を持つ）
+# App bucket name (EC2 role can read objects from it).
 $Bucket = (& $aws ssm get-parameter --region $Region --name "/$Project/s3/bucket" --query Parameter.Value --output text)
 
-Write-Host "== マイグレーション SQL を S3 にアップロード ==" -ForegroundColor Cyan
+Write-Host "== upload migration SQL to S3 =="
 & $aws s3 cp "$RepoRoot/migrations/0001_init.sql" "s3://$Bucket/$Prefix/0001_init.sql" --region $Region
 & $aws s3 cp "$RepoRoot/migrations/0002_seed.sql" "s3://$Bucket/$Prefix/0002_seed.sql" --region $Region
 
-Write-Host "== EC2 インスタンスを特定 ==" -ForegroundColor Cyan
+Write-Host "== find EC2 instance =="
 $Instance = (& $aws ec2 describe-instances --region $Region `
     --filters "Name=tag:Project,Values=$Project" "Name=instance-state-name,Values=running" `
     --query "Reservations[0].Instances[0].InstanceId" --output text)
 if (-not $Instance -or $Instance -eq "None") {
-  throw "running な EC2 が見つかりません（terraform apply 済みか確認してください）"
+  throw "running EC2 not found (check terraform apply)"
 }
 Write-Host "instance: $Instance"
 
-# EC2 上で実行する bash。__XXX__ は後で PowerShell の値に置換する（bash の $ はそのまま残す）。
+# Bash to run on EC2. __XXX__ placeholders are replaced with PowerShell values below
+# (bash $ stays literal because of the single-quoted here-string).
 $bash = @'
 set -euo pipefail
 REGION=__REGION__
@@ -48,24 +49,23 @@ rm -f /tmp/0001_init.sql /tmp/0002_seed.sql
 '@
 $bash = $bash.Replace("__REGION__", $Region).Replace("__PROJECT__", $Project).Replace("__BUCKET__", $Bucket).Replace("__PREFIX__", $Prefix)
 
-# SSM の commands は JSON 配列。ConvertTo-Json で安全にエスケープしてファイル渡しする。
+# SSM commands is a JSON array; ConvertTo-Json escapes safely. Pass via file.
 $paramsJson = @{ commands = @($bash) } | ConvertTo-Json -Compress
 $tmp = Join-Path $env:TEMP "mono-log-migrate.json"
-Set-Content -Path $tmp -Value $paramsJson -Encoding utf8
+Set-Content -Path $tmp -Value $paramsJson -Encoding ascii
 $tmpUri = "file://" + ($tmp -replace '\\', '/')
 
-Write-Host "== SSM 経由で EC2 上から RDS にマイグレーション適用 ==" -ForegroundColor Cyan
+Write-Host "== apply migration on RDS from EC2 via SSM =="
 $Cmd = (& $aws ssm send-command --region $Region --instance-ids $Instance `
     --document-name "AWS-RunShellScript" --parameters $tmpUri `
     --query "Command.CommandId" --output text)
 Write-Host "SSM command id: $Cmd"
 
 & $aws ssm wait command-executed --region $Region --command-id $Cmd --instance-id $Instance
-$res = (& $aws ssm get-command-invocation --region $Region --command-id $Cmd --instance-id $Instance `
-    --query "{Status:Status, Stdout:StandardOutputContent, Stderr:StandardErrorContent}" --output json)
-Write-Host $res
+& $aws ssm get-command-invocation --region $Region --command-id $Cmd --instance-id $Instance `
+    --query "{Status:Status, Stdout:StandardOutputContent, Stderr:StandardErrorContent}" --output json
 
-# 後片付け: アップロードした SQL を S3 から削除
+# Cleanup uploaded SQL
 & $aws s3 rm "s3://$Bucket/$Prefix/" --recursive --region $Region | Out-Null
 Remove-Item $tmp -ErrorAction SilentlyContinue
-Write-Host "== 完了 ==" -ForegroundColor Green
+Write-Host "== done =="
