@@ -10,3 +10,6 @@ README.md
 docs
 supabase
 .claude
+infra
+migrations
+compose.yaml
