@@ -16,6 +16,13 @@ const pool =
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     max: 10,
+    // RDS は rds.force_ssl=1 で SSL 必須。本番のみ SSL を有効化する
+    // （ローカルの Docker Postgres は非SSLなので無効のまま）。
+    // RDS の証明書は AWS 管理で CA を同梱しないため rejectUnauthorized:false で受理する。
+    ssl:
+      process.env.NODE_ENV === "production"
+        ? { rejectUnauthorized: false }
+        : false,
   });
 
 if (process.env.NODE_ENV !== "production") globalForPool._monologPool = pool;
