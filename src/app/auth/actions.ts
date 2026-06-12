@@ -52,9 +52,9 @@ export async function loginAction(formData: FormData) {
   const password = String(formData.get("password"));
   try {
     const tokens = await login(email, password);
-    await setSession(tokens);
 
-    // 初回ログイン時に users 行を作成（id = Cognito の sub）。RLS 下で自分の行を insert
+    // 初回ログイン時に users 行を作成（id = Cognito の sub）。RLS 下で自分の行を insert。
+    // Cookie 発行より前に行うことで、INSERT 失敗時に「セッションあり/行なし」を防ぐ。
     const payload = await verifyIdToken(tokens.idToken);
     const sub = payload.sub;
     const userEmail = payload.email as string;
@@ -68,6 +68,9 @@ export async function loginAction(formData: FormData) {
         })
         .onConflictDoNothing();
     });
+
+    // users 行が確保できてからセッション Cookie を発行する。
+    await setSession(tokens);
   } catch {
     redirect(
       `/login?error=${encodeURIComponent("メールまたはパスワードが違います")}`,
