@@ -115,6 +115,8 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    // api は各 Route Handler が Bearer 認証を行うため middleware の対象外にする
+    // （対象に含めると未ログイン扱いで /login へリダイレクトされ JSON を返せない）。
+    "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
