@@ -16,6 +16,15 @@
 
 各章の最後に「ここまでで何ができたか」を書いています。詰まったら15章のトラブルシューティングを見てください。
 
+**付録（ゼロから書き起こす場合はこちら）**
+- [付録A: Terraform手順](setup-guide-terraform.md) — 空の`infra/`から作る手順形式（ファイル作成→plan→apply）。全`.tf`の中身入り（10章の詳細）
+- [付録B: 中核アプリ実装手順](setup-guide-appcode.md) — 認証/DB/画像/actionsの中核ファイルをファイル作成→型チェックの手順形式で（完全コード＋逐行解説）
+- [付録D: データ基盤の実装手順](setup-guide-data.md) — マイグレーションSQL・types/schema/serialize・migrate.ps1をファイル作成→適用の手順形式で（完全コード＋逐行解説）
+- [付録C: REST API実装手順](setup-guide-api.md) — 外部向けREST API(`/api/v1`)をファイル作成→確認の手順形式で実装（全コード入り）
+- [APIリファレンス](api-reference.md) — 上記APIの仕様（エンドポイント・curl例）
+
+> 付録A〜Dは各コードブロックに**逐行解説**（1行ずつ何をしているかの説明）を付けています。同型の繰り返し（似たSSMパラメータ・テーブル定義・RLSポリシー等）は最初の1つを詳説し、残りはパターンとしてまとめています。
+
 ---
 
 ## 1. 全体像（アーキテクチャ）
@@ -257,7 +266,7 @@ S3_IMAGE_BUCKET=mono-log-item-images-＜あなたのアカウントID＞
 
 ## 7. アプリのソース構成（役割と勘所）
 
-アプリ本体のコードは量が多いので、ここでは**各ファイルの役割**と、**未経験者が特に理解すべき勘所**をまとめます。完全な実装はリポジトリの各ファイルを参照してください。
+アプリ本体のコードは量が多いので、ここでは**各ファイルの役割**と、**未経験者が特に理解すべき勘所**をまとめます。中核ファイル（cognito/session/middleware/client/image/actions）の**完全版は[付録B: 主要アプリコード全文](setup-guide-appcode.md)**に、それ以外はリポジトリの実ファイルを参照してください。
 
 ### ディレクトリ構成
 ```
@@ -271,7 +280,10 @@ src/
     items/actions.ts       … アイテムCRUDのサーバアクション（RLS下でINSERT/UPDATE）
     dashboard/ mypage/      … ダッシュボード/マイページ（退会・メール変更）
     import/                … CSV等の取込
-    api/export/route.ts    … エクスポートAPI
+    api/export/route.ts    … エクスポートAPI（ブラウザのCookie認証・ダウンロード用）
+    api/v1/                 … 外部向けREST API（Cognito Bearer認証）。items/categories/export
+  lib/api/items.ts         … REST APIのitems入力検証・整形（route間で共有）
+  lib/auth/api.ts          … REST APIのBearer認証ヘルパ + JSONエラー応答
   components/              … UI部品（item-card, item-form, nav-bar, filter-bar）
   db/
     client.ts              … pg接続プール + withUser(RLSコンテキスト実行)
@@ -285,6 +297,8 @@ src/
     format.ts              … 表示整形
   types/item.ts            … アプリ共通の型
 ```
+
+> 外部向けREST API（`/api/v1`・Cognito Bearer認証）の実装は[付録C: REST API実装手順](setup-guide-api.md)、仕様は[APIリファレンス](api-reference.md)を参照。Server Actions（画面用）とは別に、モバイル/外部連携向けのJSON APIを用意しています。
 
 ### 勘所（ここが理解の山）
 
@@ -307,7 +321,7 @@ src/
 
 ## 8. データベース設計（スキーマ + RLS）
 
-DDL（テーブル定義・RLS・ロール作成）は**手書きSQL**で管理します。`drizzle-kit`は入っていますが、RLSやロールの細かい制御のため自動生成は使わず、`drizzle-orm`は**クエリ側の型**として使います。
+DDL（テーブル定義・RLS・ロール作成）は**手書きSQL**で管理します。`drizzle-kit`は入っていますが、RLSやロールの細かい制御のため自動生成は使わず、`drizzle-orm`は**クエリ側の型**として使います。**SQL全文・`schema.ts`・`serialize.ts`・`types/item.ts`は[付録D: データ基盤全文](setup-guide-data.md)**にあります（写経でDB＋型が揃う）。
 
 - `migrations/0001_init.sql`
   - `app.current_user_id()`関数（`current_setting`からsubを取り出す）
@@ -364,7 +378,7 @@ npm run dev
 
 ## 10. インフラ構築（Terraform）
 
-`infra/`配下にVPC/Cognito/RDS/S3/ECR/EC2/CloudFront/SSM/IAMの定義があります。
+`infra/`配下にVPC/Cognito/RDS/S3/ECR/EC2/CloudFront/SSM/IAMの定義があります。**ゼロから作る手順は[付録A: Terraform手順](setup-guide-terraform.md)**にあります（ファイル作成→`plan`→`apply`の手順形式・全`.tf`の中身入り）。
 
 ### 10-1. tfstateバケットの用意（最初の1回だけ）
 Terraformの状態ファイル（tfstate）をS3に保存する設定（`infra/versions.tf`の`backend "s3"`）になっています。バケット名は**アカウント固有**なので、**自分用に作って名前を書き換え**ます。
@@ -410,7 +424,7 @@ terraform apply    # yes で作成。RDS作成に数分かかる
 
 ## 11. 本番DBマイグレーション（migrate.ps1）
 
-RDSは非公開なので、SQLを**S3経由でEC2に渡し、EC2上の`psql`コンテナからRDSへ適用**します。`infra/migrate.ps1`が一連を自動化しています。**RDSを作り直すたびに1回**実行します。
+RDSは非公開なので、SQLを**S3経由でEC2に渡し、EC2上の`psql`コンテナからRDSへ適用**します。`infra/migrate.ps1`が一連を自動化しています（**スクリプト全文は[付録D: データ基盤全文](setup-guide-data.md#d-6-inframigrateps1本番rdsへのマイグレーション実行)**）。**RDSを作り直すたびに1回**実行します。
 
 ```powershell
 # infra/ で実行（Windows PowerShell）
