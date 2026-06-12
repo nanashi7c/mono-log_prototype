@@ -17,12 +17,19 @@ const clientId = process.env.COGNITO_CLIENT_ID!;
 
 const client = new CognitoIdentityProviderClient({ region });
 
-// ID トークンを検証する verifier（JWKS を自動取得・キャッシュする）
-const idVerifier = CognitoJwtVerifier.create({
-  userPoolId,
-  clientId,
-  tokenUse: "id",
-});
+// ID トークンを検証する verifier（JWKS を自動取得・キャッシュする）。
+// ビルド時は env が無く userPoolId が undefined になり create() が落ちるため、初回利用時に遅延生成する。
+let idVerifier: ReturnType<typeof CognitoJwtVerifier.create> | null = null;
+function getIdVerifier() {
+  if (!idVerifier) {
+    idVerifier = CognitoJwtVerifier.create({
+      userPoolId: process.env.COGNITO_USER_POOL_ID!,
+      clientId: process.env.COGNITO_CLIENT_ID!,
+      tokenUse: "id",
+    });
+  }
+  return idVerifier;
+}
 
 export type AuthTokens = {
   idToken: string;
@@ -98,7 +105,7 @@ export async function refresh(
 
 // ID トークンを検証して中身（sub / email 等）を返す。失敗時は例外
 export async function verifyIdToken(idToken: string) {
-  return idVerifier.verify(idToken);
+  return getIdVerifier().verify(idToken);
 }
 
 // パスワード変更（アクセストークン＋現パスワードで検証。現パスワード誤りは例外）
