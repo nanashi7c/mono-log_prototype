@@ -50,6 +50,6 @@ terraform destroy `
 - 完全に消す場合は `terraform destroy`（tfstate/S3/Cognito は別管理なので残ることがある）
 
 ## メモ
-- アカウントは作成 12 ヶ月超のため無料枠対象外。RDS/EC2/CloudFront は起動中ずっと課金される
+- RDS/EC2/CloudFront は起動中ずっと課金される（最小構成で約 $20〜24/月）。使い終わったら destroy する
 - アプリの設定（DB/Cognito/S3）は EC2 起動時に SSM から読み込む（`/etc/mono-log.env` と `mono-log-run.sh`）
 - ローカル開発は `compose.yaml` の Postgres + `.env.local`。本番とは独立

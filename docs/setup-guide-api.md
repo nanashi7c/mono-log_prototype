@@ -57,7 +57,8 @@ export function badRequest(message: string): NextResponse { return jsonError(400
 
 export function dbErrorResponse(e: unknown): NextResponse {
   const code = (e as { code?: string }).code;
-  if (typeof code === "string" && code.startsWith("23")) {
+  // Prisma の既知エラー(P2xxx: 一意/FK/制約等)はクライアント起因が多いので 400
+  if (typeof code === "string" && /^P2\d{3}$/.test(code)) {
     return jsonError(400, (e as Error).message);
   }
   console.error(e);
@@ -74,14 +75,12 @@ export function dbErrorResponse(e: unknown): NextResponse {
   - `catch { return null }`: 不正/失効は`null`(呼び元が401を返す)。
 - `jsonError(status, message)`: `NextResponse.json({ error }, { status })`で**統一エラーJSON**。
 - `unauthorized()`=401、`badRequest(msg)`=400 の薄いラッパ。
-- `dbErrorResponse(e)`: DB例外をHTTPに振り分け。`(e).code`がPostgresのエラーコード。`"23"`始まり=整合性制約違反(FK/CHECK/UNIQUE等)→**クライアント起因なので400**。それ以外は`console.error`して500。
+- `dbErrorResponse(e)`: DB例外をHTTPに振り分け。`(e).code`がPrismaのエラーコード。`P2xxx`(一意`P2002`/FK`P2003`等)=クライアント起因が多い→**400**。それ以外は`console.error`して500。
 
 ---
 
 ## Step 3. items 共有ロジック `src/lib/api/items.ts`
 ```ts
-import { inArray } from "drizzle-orm";
-import { itemsCategories } from "@/db/schema";
 import type { Tx } from "@/db/client";
 import type { ItemStatus } from "@/types/item";
 
@@ -89,17 +88,19 @@ export const ITEM_STATUSES: ItemStatus[] = ["planned", "owned", "listed", "sold"
 
 export type ItemInput = { /* status,name,janCode,quantity,notes,actualPrice,purchasedAt,categoryIds */ };
 
+// item_id(number) は BigInt にして検索、結果のキーは Number へ戻す。
 export async function categoryIdsByItem(tx: Tx, ids: number[]): Promise<Map<number, number[]>> {
   const map = new Map<number, number[]>();
   if (ids.length === 0) return map;
-  const links = await tx
-    .select({ itemId: itemsCategories.itemId, categoryId: itemsCategories.categoryId })
-    .from(itemsCategories)
-    .where(inArray(itemsCategories.itemId, ids));
+  const links = await tx.itemCategory.findMany({
+    where: { itemId: { in: ids.map((n) => BigInt(n)) } },
+    select: { itemId: true, categoryId: true },
+  });
   for (const l of links) {
-    const arr = map.get(l.itemId) ?? [];
+    const k = Number(l.itemId);
+    const arr = map.get(k) ?? [];
     arr.push(l.categoryId);
-    map.set(l.itemId, arr);
+    map.set(k, arr);
   }
   return map;
 }
@@ -109,7 +110,7 @@ export async function categoryIdsByItem(tx: Tx, ids: number[]): Promise<Map<numb
 - `ItemInput`型: 整形後のアイテム入力(camelCase)。
 - `categoryIdsByItem(tx, ids)`: アイテムID群に対し、紐づくカテゴリIDを**まとめて**取得し`Map<itemId, categoryId[]>`で返す(N+1回避)。
   - `if (ids.length === 0) return map`: 空なら即返す。
-  - `tx.select({...}).from(itemsCategories).where(inArray(itemsCategories.itemId, ids))`: 中間表から該当リンクを一括取得。`inArray`は`IN (...)`。
+  - `tx.itemCategory.findMany({ where: { itemId: { in: ids.map(BigInt) } } })`: 中間表から該当リンクを一括取得。`item_id`はBigIntなので`BigInt(n)`に変換、Mapのキーは`Number(l.itemId)`へ戻す。
   - `for (const l of links) { ... map.set(...) }`: itemIdごとに配列へ詰める。
 
 ```ts
@@ -156,9 +157,7 @@ export function parseItemBody(body: unknown):
 ## Step 4. items 一覧/作成 `src/app/api/v1/items/route.ts`
 ```ts
 import { NextResponse, type NextRequest } from "next/server";
-import { and, eq, isNull } from "drizzle-orm";
 import { withUser } from "@/db/client";
-import { items, itemsCategories, users } from "@/db/schema";
 import { toItem } from "@/db/serialize";
 import { getApiUser, unauthorized, badRequest, dbErrorResponse } from "@/lib/auth/api";
 import { ITEM_STATUSES, categoryIdsByItem, parseItemBody } from "@/lib/api/items";
@@ -178,11 +177,11 @@ export async function GET(req: NextRequest) {
 
   try {
     const result = await withUser(user.sub, async (tx) => {
-      const conds = [isNull(items.deletedAt)];
-      if (status) conds.push(eq(items.status, status));
-      const rows = await tx.select().from(items).where(and(...conds));
-      const linkMap = await categoryIdsByItem(tx, rows.map((r) => r.id));
-      return rows.map((r) => ({ ...toItem(r), category_ids: linkMap.get(r.id) ?? [] }));
+      const rows = await tx.item.findMany({
+        where: { deletedAt: null, ...(status ? { status } : {}) },
+      });
+      const linkMap = await categoryIdsByItem(tx, rows.map((r) => Number(r.id)));
+      return rows.map((r) => ({ ...toItem(r), category_ids: linkMap.get(Number(r.id)) ?? [] }));
     });
     return NextResponse.json({ items: result });
   } catch (e) {
@@ -196,11 +195,9 @@ export async function GET(req: NextRequest) {
 - `req.nextUrl.searchParams.get("status")`: クエリ`?status=`を取得。
 - `if (statusParam && !ITEM_STATUSES.includes(...)) return badRequest(...)`: 不正statusは400。
 - `await withUser(user.sub, async (tx) => {...})`: **RLS文脈で実行**(自分の行のみ)。
-  - `const conds = [isNull(items.deletedAt)]`: 条件配列。まず「削除されていない」。
-  - `if (status) conds.push(eq(items.status, status))`: status指定があれば条件追加。
-  - `tx.select().from(items).where(and(...conds))`: 条件をANDで結合して取得。`...conds`はスプレッド。
-  - `categoryIdsByItem(tx, rows.map(r=>r.id))`: 各アイテムのカテゴリIDをまとめて取得。
-  - `rows.map((r) => ({ ...toItem(r), category_ids: linkMap.get(r.id) ?? [] }))`: `toItem`でDB行をAPI形(snake_case)へ変換し、`category_ids`を付与。
+  - `tx.item.findMany({ where: { deletedAt: null, ...(status?{status}:{}) } })`: RLSで自分の行のみ。`deletedAt: null`＋status指定で絞り込む。
+  - `categoryIdsByItem(tx, rows.map(r=>Number(r.id)))`: 各アイテムのカテゴリIDをまとめて取得（idはBigInt→Number）。
+  - `rows.map((r) => ({ ...toItem(r), category_ids: linkMap.get(Number(r.id)) ?? [] }))`: `toItem`でPrisma行をAPI形(snake_case・BigInt/Decimal→number)へ変換し、`category_ids`を付与。
 - `return NextResponse.json({ items: result })`: 一覧をJSONで返す。
 - `catch (e) { return dbErrorResponse(e) }`: DB例外を400/500に振り分け。
 
@@ -217,16 +214,23 @@ export async function POST(req: NextRequest) {
 
   try {
     const created = await withUser(user.sub, async (tx) => {
-      await tx.insert(users)
-        .values({ id: user.sub, email: user.email, username: user.email.split("@")[0] })
-        .onConflictDoNothing();
-      const inserted = await tx.insert(items).values({
-        userId: user.sub, status: v.status, name: v.name, janCode: v.janCode,
-        quantity: v.quantity, notes: v.notes, actualPrice: v.actualPrice, purchasedAt: v.purchasedAt,
-      }).returning();
-      const row = inserted[0];
+      // FK対策: users 行を upsert で確保
+      await tx.user.upsert({
+        where: { id: user.sub },
+        update: {},
+        create: { id: user.sub, email: user.email, username: user.email.split("@")[0] },
+      });
+      const row = await tx.item.create({
+        data: {
+          userId: user.sub, status: v.status, name: v.name, janCode: v.janCode,
+          quantity: v.quantity, notes: v.notes, actualPrice: v.actualPrice,
+          purchasedAt: v.purchasedAt ? new Date(v.purchasedAt) : null,
+        },
+      });
       if (v.categoryIds.length > 0) {
-        await tx.insert(itemsCategories).values(v.categoryIds.map((cid) => ({ itemId: row.id, categoryId: cid })));
+        await tx.itemCategory.createMany({
+          data: v.categoryIds.map((cid) => ({ itemId: row.id, categoryId: cid })),
+        });
       }
       return { ...toItem(row), category_ids: v.categoryIds };
     });
@@ -240,9 +244,9 @@ export async function POST(req: NextRequest) {
 - `let body; try { body = await req.json() } catch { return badRequest(...) }`: リクエストボディをJSONとして読む。壊れていれば400。
 - `const parsed = parseItemBody(body); if (!parsed.ok) return badRequest(parsed.error)`: 検証。失敗で400。
 - `await withUser(user.sub, async (tx) => {...})`内:
-  - `tx.insert(users).values({...}).onConflictDoNothing()`: **FK対策**。`items.user_id → users.id`のため、API専用クライアント(Web未ログイン)でも動くよう`users`行を先に確保。
-  - `tx.insert(items).values({...}).returning()`: アイテム挿入し全列を取得(`returning()`)。
-  - `if (v.categoryIds.length > 0) { tx.insert(itemsCategories)... }`: カテゴリ紐付けを挿入。
+  - `tx.user.upsert({ where:{id}, update:{}, create:{...} })`: **FK対策**。`items.user_id → users.id`のため、API専用クライアント(Web未ログイン)でも動くよう`users`行を先に確保（あれば何もしない）。
+  - `tx.item.create({ data:{...} })`: アイテム挿入し作成行を取得（`purchasedAt`は`new Date()`で日付化）。
+  - `if (v.categoryIds.length > 0) { tx.itemCategory.createMany(...) }`: カテゴリ紐付けを一括挿入。
   - `return { ...toItem(row), category_ids: v.categoryIds }`: 作成結果をAPI形で返す。
 - `NextResponse.json({ item: created }, { status: 201 })`: **201 Created**で返す。
 
@@ -265,10 +269,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   if (id == null) return badRequest("invalid id");
   try {
     const result = await withUser(user.sub, async (tx) => {
-      const rows = await tx.select().from(items).where(eq(items.id, id)).limit(1);
-      if (!rows[0]) return null;
+      const row = await tx.item.findFirst({ where: { id: BigInt(id) } });
+      if (!row) return null;
       const linkMap = await categoryIdsByItem(tx, [id]);
-      return { ...toItem(rows[0]), category_ids: linkMap.get(id) ?? [] };
+      return { ...toItem(row), category_ids: linkMap.get(id) ?? [] };
     });
     if (!result) return jsonError(404, "not found");
     return NextResponse.json({ item: result });
@@ -278,18 +282,20 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 **逐行解説**
 - 第2引数`ctx: { params: Promise<{ id: string }> }`: 動的セグメント。Next 15では`params`がPromiseなので`await ctx.params`。
 - `const id = parseId((await ctx.params).id)`: idを整数化。不正なら400。
-- `tx.select().from(items).where(eq(items.id, id)).limit(1)`: 1件取得。RLSで他人の行は見えないので、`!rows[0]`なら`null`→**404**。
+- `tx.item.findFirst({ where: { id: BigInt(id) } })`: 1件取得。idはBigInt。RLSで他人の行は見えないので、無ければ`null`→**404**。
 - 取得できれば`toItem`＋`category_ids`で返す。
 
 ```ts
 export async function PUT(req, ctx) {
   /* getApiUser → parseId → req.json → parseItemBody */
   const result = await withUser(user.sub, async (tx) => {
-    const updated = await tx.update(items).set({ /* v各項目 */ }).where(eq(items.id, id)).returning();
-    if (!updated[0]) return null;
-    await tx.delete(itemsCategories).where(eq(itemsCategories.itemId, id));
-    if (v.categoryIds.length > 0) await tx.insert(itemsCategories).values(/* 置換 */);
-    return { ...toItem(updated[0]), category_ids: v.categoryIds };
+    // RLSで他人の行は見えない。存在確認してから更新。
+    const exists = await tx.item.findFirst({ where: { id: BigInt(id) }, select: { id: true } });
+    if (!exists) return null;
+    const row = await tx.item.update({ where: { id: BigInt(id) }, data: { /* v各項目(purchasedAtはnew Date) */ } });
+    await tx.itemCategory.deleteMany({ where: { itemId: BigInt(id) } });
+    if (v.categoryIds.length > 0) await tx.itemCategory.createMany({ data: /* 置換 */ });
+    return { ...toItem(row), category_ids: v.categoryIds };
   });
   if (!result) return jsonError(404, "not found");
   return NextResponse.json({ item: result });
@@ -297,17 +303,17 @@ export async function PUT(req, ctx) {
 ```
 **逐行解説**
 - 入口はPOSTと同様(認証・id・body検証)。
-- `tx.update(items).set({...}).where(eq(items.id, id)).returning()`: 更新し、更新後の行を取得。`!updated[0]`(0件=他人/存在しない)なら**404**。
-- カテゴリは**置換**: `delete`で全消し→`insert`で入れ直す。
+- `findFirst`で存在確認(他人/存在しない＝`null`→**404**)→`tx.item.update({ where:{id}, data })`で更新し行を取得。
+- カテゴリは**置換**: `deleteMany`で全消し→`createMany`で入れ直す。
 - 更新後の行を返す。
 
 ```ts
 export async function DELETE(req, ctx) {
   const deleted = await withUser(user.sub, async (tx) => {
-    const rows = await tx.select({ imageUrl: items.imageUrl }).from(items).where(eq(items.id, id)).limit(1);
-    if (!rows[0]) return false;
-    if (rows[0].imageUrl) await deleteImage(rows[0].imageUrl);
-    await tx.delete(items).where(eq(items.id, id));
+    const row = await tx.item.findFirst({ where: { id: BigInt(id) }, select: { imageUrl: true } });
+    if (!row) return false;
+    if (row.imageUrl) await deleteImage(row.imageUrl);
+    await tx.item.deleteMany({ where: { id: BigInt(id) } });
     return true;
   });
   if (!deleted) return jsonError(404, "not found");
@@ -316,7 +322,7 @@ export async function DELETE(req, ctx) {
 ```
 **逐行解説**
 - 先に`image_url`を読み、あれば`deleteImage`でS3からも削除。
-- `tx.delete(items).where(eq(items.id, id))`: 行削除(関連は`on delete cascade`)。
+- `tx.item.deleteMany({ where: { id: BigInt(id) } })`: 行削除(関連は`on delete cascade`)。
 - 対象が無ければ404、成功は**204 No Content**(本文なし)。
 
 ---
@@ -328,7 +334,7 @@ export async function GET(req: NextRequest) {
   if (!user) return unauthorized();
   try {
     const result = await withUser(user.sub, async (tx) => {
-      const rows = await tx.select().from(categories);
+      const rows = await tx.category.findMany();
       return rows.map(toCategory);
     });
     return NextResponse.json({ categories: result });
@@ -336,7 +342,7 @@ export async function GET(req: NextRequest) {
 }
 ```
 **逐行解説**
-- `tx.select().from(categories)`: RLSの`categories_select`(`is_preset or user_id=自分`)により、**プリセット＋自分のカテゴリ**だけが返る。
+- `tx.category.findMany()`: RLSの`categories_select`(`is_preset or user_id=自分`)により、**プリセット＋自分のカテゴリ**だけが返る。
 - `rows.map(toCategory)`: API形に変換して返す。
 
 ```ts
@@ -348,11 +354,12 @@ export async function POST(req: NextRequest) {
   const color = typeof b.color === "string" && b.color.trim() ? b.color.trim() : undefined;
   try {
     const { category, created } = await withUser(user.sub, async (tx) => {
-      await tx.insert(users).values({ id: user.sub, email: user.email, username: user.email.split("@")[0] }).onConflictDoNothing();
-      const inserted = await tx.insert(categories).values({ userId: user.sub, name, ...(color ? { color } : {}) }).onConflictDoNothing().returning();
-      if (inserted[0]) return { category: toCategory(inserted[0]), created: true };
-      const found = await tx.select().from(categories).where(and(eq(categories.userId, user.sub), eq(categories.name, name))).limit(1);
-      return { category: toCategory(found[0]), created: false };
+      await tx.user.upsert({ where: { id: user.sub }, update: {}, create: { id: user.sub, email: user.email, username: user.email.split("@")[0] } });
+      // 同名(user_id, name)があればそれを返す。無ければ作成。
+      const existing = await tx.category.findFirst({ where: { userId: user.sub, name } });
+      if (existing) return { category: toCategory(existing), created: false };
+      const row = await tx.category.create({ data: { userId: user.sub, name, ...(color ? { color } : {}) } });
+      return { category: toCategory(row), created: true };
     });
     return NextResponse.json({ category }, { status: created ? 201 : 200 });
   } catch (e) { return dbErrorResponse(e); }
@@ -360,25 +367,23 @@ export async function POST(req: NextRequest) {
 ```
 **逐行解説**
 - `name`必須、`color`は任意(文字列のみ)。`...(color ? { color } : {})`は**色指定があるときだけ`color`を含める**(無ければDB既定色)。
-- `users`行を確保(FK対策)。
-- `tx.insert(categories).values({...}).onConflictDoNothing().returning()`: 挿入。`unique(user_id, name)`衝突時は何も挿入されず`inserted[0]`が空。
-  - 挿入できた→`created: true`。
-  - 衝突(既存)→`select`で既存を引き、`created: false`。
+- `users`行を upsert で確保(FK対策)。
+- **check→create**: `findFirst`で同名を探し、あれば`created:false`で返す。無ければ`create`で作り`created:true`。（Prismaの対話TXは衝突例外で中断するため、`onConflict`相当は使わず先に確認する）
 - `status: created ? 201 : 200`: 新規は201、既存返却は200。
 
 ```ts
 // categories/[id]/route.ts
 export async function DELETE(req, ctx) {
   const deleted = await withUser(user.sub, async (tx) => {
-    const rows = await tx.delete(categories).where(eq(categories.id, id)).returning({ id: categories.id });
-    return rows.length > 0;
+    const res = await tx.category.deleteMany({ where: { id } });
+    return res.count > 0;
   });
   if (!deleted) return jsonError(404, "not found");
   return new NextResponse(null, { status: 204 });
 }
 ```
 **逐行解説**
-- `tx.delete(categories).where(eq(categories.id, id)).returning(...)`: 削除。RLS`categories_delete`(`user_id=自分`)により、**プリセット(user_id null)や他人の行は対象外**＝0件→404。
+- `tx.category.deleteMany({ where: { id } })`: 削除し`count`で判定。RLS`categories_delete`(`user_id=自分`)により、**プリセット(user_id null)や他人の行は対象外**＝0件→404。
 - 自分のカテゴリが消えれば204。
 
 ---
@@ -390,12 +395,12 @@ export async function GET(req: NextRequest) {
   if (!user) return unauthorized();
   try {
     const { exportedCategories, exportedItems } = await withUser(user.sub, async (tx) => {
-      const catRows = await tx.select().from(categories).where(eq(categories.userId, user.sub));
-      const itemRows = await tx.select().from(items);
-      const linkMap = await categoryIdsByItem(tx, itemRows.map((r) => r.id));
+      const catRows = await tx.category.findMany({ where: { userId: user.sub } });
+      const itemRows = await tx.item.findMany();
+      const linkMap = await categoryIdsByItem(tx, itemRows.map((r) => Number(r.id)));
       return {
         exportedCategories: catRows.map(toCategory),
-        exportedItems: itemRows.map((r) => ({ ...toItem(r), category_ids: linkMap.get(r.id) ?? [] })),
+        exportedItems: itemRows.map((r) => ({ ...toItem(r), category_ids: linkMap.get(Number(r.id)) ?? [] })),
       };
     });
     const payload = { version: 1, exported_at: new Date().toISOString(), categories: exportedCategories, items: exportedItems };

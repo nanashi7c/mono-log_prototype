@@ -52,14 +52,14 @@ resource "aws_security_group" "rds" {
   }
 }
 
-# RDS PostgreSQL本体（db.t4g.micro・Single-AZ・private・無料枠）
+# RDS PostgreSQL本体（db.t4g.micro・Single-AZ・private・最小構成）
 resource "aws_db_instance" "main" {
   identifier     = "${var.project_name}-db"
   engine         = "postgres"
   engine_version = "16"           # メジャー16系（最新マイナーを自動選択）
-  instance_class = "db.t4g.micro" # 無料枠対象（750h/月・12ヶ月）
+  instance_class = "db.t4g.micro" # 最小クラス（ARM/Graviton・最安）
 
-  allocated_storage = 20 # GB単位（無料枠は20GBまで）
+  allocated_storage = 20 # GB単位（最小構成）
   storage_type      = "gp2"
   storage_encrypted = true # 保存時暗号化
 
@@ -75,7 +75,7 @@ resource "aws_db_instance" "main" {
   auto_minor_version_upgrade = true
   backup_retention_period    = 7
 
-  # 学習用の設定（本番では見直す）
+  # 簡易設定（本番では見直す）
   skip_final_snapshot = true  # 削除時に最終スナップショットを取らない
   deletion_protection = false # 削除保護なし
 

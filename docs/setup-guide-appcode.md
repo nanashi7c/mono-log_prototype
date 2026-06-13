@@ -2,7 +2,7 @@
 
 [setup-guide.md](setup-guide.md) の7章の詳細版。認証・DB・画像まわりの中核ファイルを**ファイル作成の手順形式**で実装し、各コードの直後に**逐行解説**を付けます。画面(`page.tsx`)・UI部品・計算・整形は[付録D](setup-guide-data.md)とリポジトリを参照。
 
-- **前提**: 5〜6章で雛形・設定・依存導入が済んでいること。型(`types/item.ts`)・スキーマ(`schema.ts`)・シリアライザ(`serialize.ts`)は[付録D](setup-guide-data.md)で先に作っておくと、本章のコードがそのまま型チェックを通ります。
+- **前提**: 5〜6章で雛形・設定・依存導入が済んでいること。型(`types/item.ts`)・スキーマ(`prisma/schema.prisma`)・シリアライザ(`serialize.ts`)は[付録D](setup-guide-data.md)で先に作り、`npx prisma generate`まで済ませておくと、本章のコードがそのまま型チェックを通ります。
 - 各Stepは「指定パスにファイルを新規作成し、下のコードを貼る」。最後のStep 8で型チェック。
 
 ### 前提知識（最初に1回）
@@ -16,64 +16,59 @@
 ## Step 1. `src/db/client.ts` を作成
 
 ```ts
-import { Pool } from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
-import { sql } from "drizzle-orm";
-import * as schema from "./schema";
+import { PrismaClient, Prisma } from "@prisma/client";
 
-// プロセス内コネクションプール（dev のホットリロードで増えないよう global 保持）。
-const globalForPool = globalThis as unknown as { _monologPool?: Pool };
+// アプリの接続URLを個別 env から組み立てる。アプリは常に DB_USER(=monolog_app・非所有者)で
+// 接続して RLS を効かせる。Prisma CLI 用の DATABASE_URL は admin を指すため、ここでは使わない。
+// RDS は rds.force_ssl=1 で SSL 必須なので本番のみ sslmode=require を付与する。
+function buildDatabaseUrl(): string | undefined {
+  const host = process.env.DB_HOST;
+  const port = process.env.DB_PORT;
+  const name = process.env.DB_NAME;
+  const user = process.env.DB_USER;
+  const pw = process.env.DB_PASSWORD;
+  if (!host || !port || !name || !user || pw == null) return undefined;
+  const ssl = process.env.NODE_ENV === "production" ? "?sslmode=require" : "";
+  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(pw)}@${host}:${port}/${name}${ssl}`;
+}
 
-const pool =
-  globalForPool._monologPool ??
-  new Pool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT),
-    database: process.env.DB_NAME,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    max: 10,
-    // RDS は rds.force_ssl=1 で SSL 必須。本番のみ SSL を有効化する
-    // （ローカルの Docker Postgres は非SSLなので無効のまま）。
-    ssl:
-      process.env.NODE_ENV === "production"
-        ? { rejectUnauthorized: false }
-        : false,
-  });
+// dev のホットリロードで PrismaClient が増殖しないよう global に保持する。
+const globalForPrisma = globalThis as unknown as { _monologPrisma?: PrismaClient };
 
-if (process.env.NODE_ENV !== "production") globalForPool._monologPool = pool;
+// ビルド時は env が無く接続URLを組めないため、初回利用時に遅延生成する。
+let cached: PrismaClient | null = null;
+function getPrisma(): PrismaClient {
+  if (cached) return cached;
+  if (globalForPrisma._monologPrisma) {
+    cached = globalForPrisma._monologPrisma;
+    return cached;
+  }
+  cached = new PrismaClient({ datasourceUrl: buildDatabaseUrl() });
+  if (process.env.NODE_ENV !== "production") globalForPrisma._monologPrisma = cached;
+  return cached;
+}
 
-export const db = drizzle(pool, { schema });
-
-export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+// withUser のコールバックが受け取るトランザクションクライアント型。
+export type Tx = Prisma.TransactionClient;
 
 // 指定ユーザ(sub)の RLS コンテキストでクエリを実行するヘルパー。
 export async function withUser<T>(
   sub: string,
   fn: (tx: Tx) => Promise<T>,
 ): Promise<T> {
-  return db.transaction(async (tx) => {
-    await tx.execute(
-      sql`select set_config('app.current_user_id', ${sub}, true)`,
-    );
+  return getPrisma().$transaction(async (tx) => {
+    await tx.$executeRaw`select set_config('app.current_user_id', ${sub}, true)`;
     return fn(tx);
   });
 }
 ```
 **逐行解説**
-- `import { Pool } from "pg"`: PostgreSQLの**コネクションプール**(接続の使い回し)。
-- `import { drizzle } from "drizzle-orm/node-postgres"`: Drizzleをpgで使うアダプタ。
-- `import { sql } from "drizzle-orm"`: 生SQLを安全に書くタグ。
-- `import * as schema from "./schema"`: テーブル定義一式(付録D-3)。
-- `const globalForPool = globalThis as ...`: プール保持の受け皿。devのホットリロードで接続増殖を防ぐ。
-- `const pool = globalForPool._monologPool ?? new Pool({...})`: 既存があれば再利用、なければ作成(`??`)。
-  - `host/port/database/user/password`: 環境変数から。`Number(...)`でポートを数値化。
-  - `max: 10`: 最大10接続。
-  - `ssl: 本番のみ { rejectUnauthorized: false }`: RDSはSSL必須。CAを同梱せず受理する妥協。ローカルは`false`。
-- `if (NODE_ENV !== "production") globalForPool._monologPool = pool`: 開発時のみグローバル保存。
-- `export const db = drizzle(pool, { schema })`: 以後のクエリ用`db`。
-- `export type Tx = ...`: トランザクション型を取り出す(他ファイルの引数型用)。
-- `withUser(sub, fn)`: **RLSの肝**。`db.transaction`内で`set_config('app.current_user_id', sub, true)`(このTXのみ有効)してから`fn(tx)`を実行＝「自分の行だけ」をDBが保証。
+- `import { PrismaClient, Prisma } from "@prisma/client"`: 生成済み Prisma Client と型名前空間（`Prisma.TransactionClient` 等）。
+- `buildDatabaseUrl()`: `DB_*` から接続URLを組み立てる。**アプリは常に `DB_USER`(=monolog_app・非所有者)接続**で RLS を効かせる。本番のみ `?sslmode=require`（暗号化のみ・CA検証なし＝旧 `rejectUnauthorized:false` 相当）。`DATABASE_URL`(CLI用・admin)は使わない。
+- `const globalForPrisma = ...`: PrismaClient 保持の受け皿。dev のホットリロードで増殖を防ぐ。
+- `getPrisma()`: **遅延生成**。ビルド時は env が無く接続URLを組めないため、初回利用時に `new PrismaClient({ datasourceUrl })` する（cognito の verifier と同じ理由）。`cached` で本番も単一インスタンスを再利用。
+- `export type Tx = Prisma.TransactionClient`: トランザクションクライアント型（他ファイルの引数型用）。
+- `withUser(sub, fn)`: **RLSの肝**。Prisma の interactive transaction 内で `tx.$executeRaw\`select set_config('app.current_user_id', ${sub}, true)\``（このTXのみ有効）してから `fn(tx)` を実行＝「自分の行だけ」をDBが保証。
 
 ---
 
@@ -553,7 +548,6 @@ import {
 } from "@/lib/auth/cognito";
 import { setSession, clearSession } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
-import { users } from "@/db/schema";
 
 // サインアップ → 確認コード入力ページへ
 export async function signupAction(formData: FormData) {
@@ -603,10 +597,11 @@ export async function loginAction(formData: FormData) {
     const sub = payload.sub;
     const userEmail = payload.email as string;
     await withUser(sub, async (tx) => {
-      await tx
-        .insert(users)
-        .values({ id: sub, email: userEmail, username: userEmail.split("@")[0] })
-        .onConflictDoNothing();
+      await tx.user.upsert({
+        where: { id: sub },
+        update: {},
+        create: { id: sub, email: userEmail, username: userEmail.split("@")[0] },
+      });
     });
 
     // users 行が確保できてからセッション Cookie を発行する。
@@ -629,8 +624,8 @@ export async function logoutAction() {
 - `confirmAction`: `confirmSignUp(email,code)`→失敗で`/confirm`にエラー、成功で`/login?confirmed=1`。
 - `loginAction`（**順序が肝**）:
   - `login(...)`でトークン取得→`verifyIdToken`で`sub`/`email`取得。
-  - `withUser(sub, ... tx.insert(users)....onConflictDoNothing())`: **users行を先に確保**。
-  - `setSession(tokens)`: **行確保後にCookie発行**(逆順だとorphanセッション。7章勘所3)。
+  - `withUser(sub, ... tx.user.upsert({ where:{id}, update:{}, create:{...} }))`: **users行を先に確保**（あれば何もしない）。
+  - `setSession(tokens)`: **行確保後にCookie発行**(逆順だとorphanセッション。7章勘所4)。
   - 失敗で`/login?error=`、成功で`/items`。
 - `logoutAction`: `clearSession()`→`/login`。
 
@@ -645,19 +640,8 @@ export async function logoutAction() {
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser, type Tx } from "@/db/client";
-import {
-  items,
-  categories,
-  itemsCategories,
-  plans,
-  listings,
-  shipping,
-  shippingFees,
-  platforms,
-} from "@/db/schema";
 import { putImage, deleteImage } from "@/lib/image";
 import { computeListingMetrics } from "@/lib/listing-calc";
 import type { ItemStatus } from "@/types/item";
@@ -802,50 +786,43 @@ async function resolveShippingId(
   tx: Tx,
   serviceId: number | null,
   sizeId: number | null,
-): Promise<number | null> {
+): Promise<bigint | null> {
   if (serviceId == null || sizeId == null) return null;
-  const found = await tx
-    .select({ id: shipping.id })
-    .from(shipping)
-    .where(and(eq(shipping.shippingServiceId, serviceId), eq(shipping.shippingSizeId, sizeId)))
-    .limit(1);
-  if (found[0]) return found[0].id;
-  const created = await tx
-    .insert(shipping)
-    .values({ shippingServiceId: serviceId, shippingSizeId: sizeId })
-    .returning({ id: shipping.id });
-  return created[0].id;
+  const row = await tx.shipping.upsert({
+    where: { shippingServiceId_shippingSizeId: { shippingServiceId: serviceId, shippingSizeId: sizeId } },
+    update: {},
+    create: { shippingServiceId: serviceId, shippingSizeId: sizeId },
+    select: { id: true },
+  });
+  return row.id;
 }
 
 // 新規カテゴリ名を作成（冪等）し、選択された全カテゴリ ID を返す。
 async function resolveCategoryIds(tx: Tx, parsed: ParsedForm, userId: string): Promise<number[]> {
   const ids = new Set(parsed.category_ids);
   for (const name of parsed.new_category_names) {
-    await tx.insert(categories).values({ userId, name }).onConflictDoNothing();
-    const found = await tx
-      .select({ id: categories.id })
-      .from(categories)
-      .where(and(eq(categories.userId, userId), eq(categories.name, name)))
-      .limit(1);
-    if (found[0]) ids.add(found[0].id);
+    let cat = await tx.category.findFirst({ where: { userId, name }, select: { id: true } });
+    if (!cat) cat = await tx.category.create({ data: { userId, name }, select: { id: true } });
+    ids.add(cat.id);
   }
   return [...ids];
 }
 
 async function syncItemCategories(tx: Tx, itemId: number, categoryIds: number[]) {
-  await tx.delete(itemsCategories).where(eq(itemsCategories.itemId, itemId));
+  // 置換方式: 現行行を削除し、新しい行を挿入する。
+  await tx.itemCategory.deleteMany({ where: { itemId: BigInt(itemId) } });
   if (categoryIds.length === 0) return;
-  await tx
-    .insert(itemsCategories)
-    .values(categoryIds.map((cid) => ({ itemId, categoryId: cid })));
+  await tx.itemCategory.createMany({
+    data: categoryIds.map((cid) => ({ itemId: BigInt(itemId), categoryId: cid })),
+  });
 }
 
 async function upsertPlan(tx: Tx, itemId: number, parsed: ParsedForm) {
   if (parsed.status !== "planned") {
-    await tx.delete(plans).where(eq(plans.itemId, itemId));
+    await tx.plan.deleteMany({ where: { itemId: BigInt(itemId) } });
     return;
   }
-  const values = {
+  const data = {
     plannedPurchaseYear: parsed.plan.planned_purchase_year,
     plannedPurchaseMonth: parsed.plan.planned_purchase_month,
     listPrice: parsed.plan.list_price,
@@ -853,10 +830,11 @@ async function upsertPlan(tx: Tx, itemId: number, parsed: ParsedForm) {
     productUrl: parsed.plan.product_url,
     dealPeriod: parsed.plan.deal_period,
   };
-  await tx
-    .insert(plans)
-    .values({ itemId, ...values })
-    .onConflictDoUpdate({ target: plans.itemId, set: values });
+  await tx.plan.upsert({
+    where: { itemId: BigInt(itemId) },
+    update: data,
+    create: { itemId: BigInt(itemId), ...data },
+  });
 }
 
 async function lookupShippingFee(
@@ -865,36 +843,28 @@ async function lookupShippingFee(
   sizeId: number | null,
 ): Promise<number | null> {
   if (serviceId == null || sizeId == null) return null;
-  const r = await tx
-    .select({ fee: shippingFees.fee })
-    .from(shippingFees)
-    .where(
-      and(eq(shippingFees.shippingServiceId, serviceId), eq(shippingFees.shippingSizeId, sizeId)),
-    )
-    .limit(1);
-  return r[0]?.fee ?? null;
+  const r = await tx.shippingFee.findUnique({
+    where: { shippingServiceId_shippingSizeId: { shippingServiceId: serviceId, shippingSizeId: sizeId } },
+    select: { fee: true },
+  });
+  return r ? r.fee.toNumber() : null;
 }
 
 async function lookupPlatformFeeRate(tx: Tx, platformId: number | null): Promise<number | null> {
   if (platformId == null) return null;
-  const r = await tx
-    .select({ feeRate: platforms.feeRate })
-    .from(platforms)
-    .where(eq(platforms.id, platformId))
-    .limit(1);
-  return r[0]?.feeRate ?? null;
+  const r = await tx.platform.findUnique({ where: { id: platformId }, select: { feeRate: true } });
+  return r ? r.feeRate.toNumber() : null;
 }
 
 async function upsertListing(tx: Tx, itemId: number, parsed: ParsedForm) {
   if (parsed.status !== "listed") {
-    await tx.delete(listings).where(eq(listings.itemId, itemId));
+    await tx.listing.deleteMany({ where: { itemId: BigInt(itemId) } });
     return;
   }
   const shippingId = await resolveShippingId(tx, parsed.listing.service_id, parsed.listing.size_id);
-  const [shipping_fee, platform_fee_rate] = await Promise.all([
-    lookupShippingFee(tx, parsed.listing.service_id, parsed.listing.size_id),
-    lookupPlatformFeeRate(tx, parsed.listing.platform_id),
-  ]);
+  // Prisma の対話トランザクションは逐次実行が安全なため Promise.all は使わない。
+  const shipping_fee = await lookupShippingFee(tx, parsed.listing.service_id, parsed.listing.size_id);
+  const platform_fee_rate = await lookupPlatformFeeRate(tx, parsed.listing.platform_id);
 
   const calc = computeListingMetrics({
     selling_price: parsed.listing.selling_price,
@@ -905,7 +875,7 @@ async function upsertListing(tx: Tx, itemId: number, parsed: ParsedForm) {
     platform_fee_rate,
   });
 
-  const values = {
+  const data = {
     shippingId,
     platformId: parsed.listing.platform_id,
     quantity: parsed.listing.quantity,
@@ -919,10 +889,11 @@ async function upsertListing(tx: Tx, itemId: number, parsed: ParsedForm) {
     ordinaryProfit: calc.ordinary_profit,
     isListing: calc.is_listing,
   };
-  await tx
-    .insert(listings)
-    .values({ itemId, ...values })
-    .onConflictDoUpdate({ target: listings.itemId, set: values });
+  await tx.listing.upsert({
+    where: { itemId: BigInt(itemId) },
+    update: data,
+    create: { itemId: BigInt(itemId), ...data },
+  });
 }
 
 function revalidateAll(itemId?: number) {
@@ -948,9 +919,8 @@ export async function createItem(formData: FormData) {
     newId = await withUser(user.sub, async (tx) => {
       const categoryIds = await resolveCategoryIds(tx, parsed, user.sub);
 
-      const inserted = await tx
-        .insert(items)
-        .values({
+      const row = await tx.item.create({
+        data: {
           userId: user.sub,
           status: parsed.status,
           name: parsed.name,
@@ -958,10 +928,10 @@ export async function createItem(formData: FormData) {
           quantity: parsed.quantity,
           notes: parsed.notes,
           actualPrice: parsed.actual_price,
-          purchasedAt: parsed.purchased_at,
-        })
-        .returning({ id: items.id });
-      const itemId = inserted[0].id;
+          purchasedAt: parsed.purchased_at ? new Date(parsed.purchased_at) : null,
+        },
+      });
+      const itemId = Number(row.id);
 
       await syncItemCategories(tx, itemId, categoryIds);
       await upsertPlan(tx, itemId, parsed);
@@ -969,7 +939,7 @@ export async function createItem(formData: FormData) {
 
       if (parsed.image) {
         const key = await uploadImage(parsed.image, user.sub, itemId);
-        await tx.update(items).set({ imageUrl: key }).where(eq(items.id, itemId));
+        await tx.item.update({ where: { id: row.id }, data: { imageUrl: key } });
       }
 
       return itemId;
@@ -992,12 +962,11 @@ export async function updateItem(itemId: number, formData: FormData) {
     await withUser(user.sub, async (tx) => {
       const categoryIds = await resolveCategoryIds(tx, parsed, user.sub);
 
-      const existing = await tx
-        .select({ imageUrl: items.imageUrl })
-        .from(items)
-        .where(eq(items.id, itemId))
-        .limit(1);
-      const currentKey = existing[0]?.imageUrl ?? null;
+      const existing = await tx.item.findFirst({
+        where: { id: BigInt(itemId) },
+        select: { imageUrl: true },
+      });
+      const currentKey = existing?.imageUrl ?? null;
 
       let nextImageUrl: string | null | undefined;
       if (parsed.delete_image && currentKey) {
@@ -1009,19 +978,19 @@ export async function updateItem(itemId: number, formData: FormData) {
         nextImageUrl = await uploadImage(parsed.image, user.sub, itemId);
       }
 
-      await tx
-        .update(items)
-        .set({
+      await tx.item.updateMany({
+        where: { id: BigInt(itemId) },
+        data: {
           status: parsed.status,
           name: parsed.name,
           janCode: parsed.jan_code,
           quantity: parsed.quantity,
           notes: parsed.notes,
           actualPrice: parsed.actual_price,
-          purchasedAt: parsed.purchased_at,
+          purchasedAt: parsed.purchased_at ? new Date(parsed.purchased_at) : null,
           ...(nextImageUrl !== undefined ? { imageUrl: nextImageUrl } : {}),
-        })
-        .where(eq(items.id, itemId));
+        },
+      });
 
       await syncItemCategories(tx, itemId, categoryIds);
       await upsertPlan(tx, itemId, parsed);
@@ -1039,13 +1008,12 @@ export async function deleteItem(itemId: number) {
   const user = await authed();
 
   await withUser(user.sub, async (tx) => {
-    const existing = await tx
-      .select({ imageUrl: items.imageUrl })
-      .from(items)
-      .where(eq(items.id, itemId))
-      .limit(1);
-    if (existing[0]?.imageUrl) await removeImage(existing[0].imageUrl);
-    await tx.delete(items).where(eq(items.id, itemId));
+    const existing = await tx.item.findFirst({
+      where: { id: BigInt(itemId) },
+      select: { imageUrl: true },
+    });
+    if (existing?.imageUrl) await removeImage(existing.imageUrl);
+    await tx.item.deleteMany({ where: { id: BigInt(itemId) } });
   });
 
   revalidateAll();
@@ -1053,21 +1021,21 @@ export async function deleteItem(itemId: number) {
 }
 ```
 **逐行解説（ブロックごと）**
-- **import / STATUSES / ParsedForm**: 依存(redirect・revalidatePath・Drizzle演算子・認証・DB・schema・image・利益計算・型)を読み込み。`STATUSES`は入力で受け付ける状態。`ParsedForm`は整形後フォームの型(共通項目＋`plan`＋`listing`)。
+- **import / STATUSES / ParsedForm**: 依存(redirect・revalidatePath・認証・DB(`withUser`/`Tx`)・image・利益計算・型)を読み込み。Prismaはモデルアクセサ(`tx.item`等)で書くため、テーブルオブジェクトのimportは不要。`STATUSES`は入力で受け付ける状態。`ParsedForm`は整形後フォームの型(共通項目＋`plan`＋`listing`)。
 - **intOrNull / nonNegIntOrNull / strOrNull**: フォームの空欄をNULLに、数値/非負整数/文字列へ整える定型ヘルパ。
 - **parseForm**: フォーム全体を`ParsedForm`へ。`status`は`STATUSES`に無ければ`owned`、`category_ids`は数値化＋正の数のみ、`new_category_names`はカンマ分割、`quantity`は正整数or1、`image`は`File`かつサイズ>0のみ。`plan`/`listing`も各ヘルパで整形(`planned_purchase_month`は1〜12、`work_time_hours`は0以上の小数)。
 - **authed**: `getCurrentUser`が無ければ`/login`。あればユーザを返す。
 - **uploadImage**: 拡張子＋`userId/itemId/時刻.ext`のキーで`putImage`にS3保存しキーを返す。**removeImage**: `deleteImage`の薄いラッパ。
-- **resolveShippingId**: (service,size)に対応する`shipping`行を探し、無ければ作って`id`を返す(出品の送料計算用)。
-- **resolveCategoryIds**: 新規カテゴリ名を`onConflictDoNothing`で作り、選択済みIDと合わせて返す(`Set`で重複排除)。
-- **syncItemCategories**: 中間表を置換(全削除→新IDを挿入)。
-- **upsertPlan**: `status`が`planned`のときだけ`plans`を`onConflictDoUpdate`(あれば更新/なければ挿入)、それ以外は削除。
-- **lookupShippingFee / lookupPlatformFeeRate**: 送料・手数料率をマスタから取得。
-- **upsertListing**: `status`が`listed`のときだけ、送料・手数料率を引いて`computeListingMetrics`で利益計算し、結果を`listings`へupsert。それ以外は削除。
+- **resolveShippingId**: (service,size)に対応する`shipping`行を`tx.shipping.upsert`で取得/作成し`id`(BigInt)を返す(出品の送料計算用)。
+- **resolveCategoryIds**: 新規カテゴリ名を`findFirst`→無ければ`create`で確保し、選択済みIDと合わせて返す(`Set`で重複排除。Prismaの対話TXは失敗で中断するため check→create 方式)。
+- **syncItemCategories**: 中間表を置換(`deleteMany`→`createMany`)。`itemId`は`BigInt(itemId)`。
+- **upsertPlan**: `status`が`planned`のときだけ`tx.plan.upsert({ where:{itemId}, update, create })`(あれば更新/なければ挿入)、それ以外は`deleteMany`。
+- **lookupShippingFee / lookupPlatformFeeRate**: 送料・手数料率をマスタから`findUnique`で取得し`Decimal.toNumber()`で数値化。
+- **upsertListing**: `status`が`listed`のときだけ、送料・手数料率を引いて`computeListingMetrics`で利益計算し、結果を`tx.listing.upsert`。それ以外は`deleteMany`。Prismaの対話TXは逐次が安全なので`Promise.all`は使わない。
 - **revalidateAll**: 一覧・ダッシュボード等のキャッシュを無効化(更新を反映)。
-- **createItem**: `parseForm`→名前必須チェック→`authed`→`withUser`内で「カテゴリ確定→`items`挿入(`returning id`)→中間表/plan/listing同期→画像があればS3保存して`image_url`更新」。`catch`でエラーをURLに載せ、成功で`revalidateAll`＋詳細へ。
-- **updateItem**: `createItem`同様だが、既存`image_url`を読み`delete_image`/新画像でS3を消し/差し替え、`tx.update(items).set({...}).where(eq(items.id, itemId))`で更新。`...(nextImageUrl !== undefined ? { imageUrl: nextImageUrl } : {})`は**画像変更があったときだけ`imageUrl`を更新**する条件スプレッド。
-- **deleteItem**: 画像があればS3削除→`tx.delete(items)`で行削除(関連は`on delete cascade`)。RLSで他人の行は対象外。
+- **createItem**: `parseForm`→名前必須チェック→`authed`→`withUser`内で「カテゴリ確定→`tx.item.create`(作成行が返る)→`itemId = Number(row.id)`→中間表/plan/listing同期→画像があればS3保存して`tx.item.update`で`image_url`更新」。`catch`でエラーをURLに載せ、成功で`revalidateAll`＋詳細へ。
+- **updateItem**: `createItem`同様だが、既存`image_url`を`findFirst`で読み`delete_image`/新画像でS3を消し/差し替え、`tx.item.updateMany({ where:{ id: BigInt(itemId) }, data })`で更新（404にせず該当のみ更新）。`...(nextImageUrl !== undefined ? { imageUrl: nextImageUrl } : {})`は**画像変更時だけ`imageUrl`を更新**する条件スプレッド。
+- **deleteItem**: 画像があればS3削除→`tx.item.deleteMany({ where:{ id: BigInt(itemId) } })`で行削除(関連は`on delete cascade`)。RLSで他人の行は対象外。
 
 ---
 
@@ -1077,7 +1045,7 @@ export async function deleteItem(itemId: number) {
 npx tsc --noEmit
 ```
 **逐行解説**
-- 付録D（schema/serialize/types）も作成済みなら、ここまでのファイルが型エラーなく通る。エラーが出たら、import先（`@/db/schema`等）が作成済みか・パスが正しいかを確認。
+- 付録D（schema.prisma/serialize/types）も作成済みで`npx prisma generate`を実行済みなら、ここまでのファイルが型エラーなく通る。エラーが出たら、`@prisma/client`が生成済みか・import先（`@/db/client`等）のパスが正しいかを確認。
 - `listing-calc.ts`（`computeListingMetrics`）など未収録の依存はリポジトリ参照。
 
 ---

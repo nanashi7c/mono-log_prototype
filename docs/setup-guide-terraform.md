@@ -41,7 +41,7 @@ aws s3api create-bucket \
   - `--region ap-northeast-1`: 作成先リージョン。
   - `--create-bucket-configuration LocationConstraint=ap-northeast-1`: us-east-1以外では**リージョンの明示が必須**。これが無いとエラーになる。
 
-> 学習用に手軽に試すなら0-2は省略し、Step 1の`backend "s3"`ブロックを削除してローカル保存にしてもよい。
+> 手軽に試すだけなら0-2は省略し、Step 1の`backend "s3"`ブロックを削除してローカル保存にしてもよい。
 
 ---
 
@@ -537,7 +537,7 @@ resource "aws_db_instance" "main" {
 **逐行解説**
 - `identifier`: RDSの識別子(名前)。
 - `engine = "postgres"` / `engine_version = "16"`: PostgreSQL 16。
-- `instance_class = "db.t4g.micro"`: 最小クラス(ARM/無料枠対象)。
+- `instance_class = "db.t4g.micro"`: 最小クラス(ARM/Graviton・最安)。
 - `allocated_storage = 20` / `storage_type = "gp2"` / `storage_encrypted = true`: 20GB・汎用SSD・暗号化。
 - `db_name = "monolog"`: 初期DB名。
 - `username = "monolog_admin"` / `password = random_password.db.result`: マスターユーザと、上で生成したパスワード。
@@ -546,8 +546,8 @@ resource "aws_db_instance" "main" {
 - `publicly_accessible = false`: インターネット非公開。
 - `auto_minor_version_upgrade = true`: マイナー版自動更新。
 - `backup_retention_period = 7`: 自動バックアップ7日保持。
-- `skip_final_snapshot = true`: 削除時に最終スナップショットを取らない（学習用。**消すとデータ消滅**）。
-- `deletion_protection = false`: 削除保護なし（学習用）。
+- `skip_final_snapshot = true`: 削除時に最終スナップショットを取らない（簡易設定。**消すとデータ消滅**。本番ではfalseを検討）。
+- `deletion_protection = false`: 削除保護なし（簡易設定。本番ではtrueを検討）。
 
 ```hcl
 resource "aws_ssm_parameter" "db_host" {

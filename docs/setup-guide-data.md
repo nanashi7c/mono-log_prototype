@@ -2,20 +2,20 @@
 
 [setup-guide.md](setup-guide.md) の8章・11章の詳細版。アプリ／APIがコンパイル・起動するのに必須の土台を**ファイル作成の手順形式**で作り、各コードの直後に**逐行解説**を付けます。
 
-作成順（依存の都合でこの順）:
-1. `migrations/0001_init.sql`（DDL＋RLS＋ロール）
-2. `migrations/0002_seed.sql`（マスタ＋プリセット）
-3. `src/types/item.ts`（型。先に作る）
-4. `src/db/schema.ts`（Drizzle定義。types不要だが概念上ここ）
+作成順:
+1. `prisma/migrations/<ts>_init/migration.sql`（DDL＋RLS＋ロール）
+2. `prisma/migrations/<ts>_seed/migration.sql`（マスタ＋プリセット）
+3. `src/types/item.ts`（型）
+4. `prisma/schema.prisma`（Prismaのクエリ型。Step 6適用後に`db pull`で生成）
 5. `src/db/serialize.ts`（schema/typesに依存）
-6. ローカル適用＆型チェックで確認
+6. ローカル適用（`prisma migrate deploy`）＆`generate`＆型チェック
 7. `infra/migrate.ps1`（本番RDSへの適用スクリプト）
 
-> 関係: SQL(①)が実テーブルを作り、Drizzle(④)が同じ表を「コードの型」として定義、serialize(⑤)が結果を型(③)の形へ整える。**SQLとschema.tsは手で対応を合わせる**（drizzle-kitの自動生成は使わない＝RLS/ロールを手書きSQLで管理するため）。
+> 関係: SQL(①)が実テーブル・RLS・ロールを作り（**Prisma Migrate が管理**）、`schema.prisma`(④)が同じ表を Prisma Client の「クエリ型」として定義、serialize(⑤)が結果を型(③)の形へ整える。**CHECK制約・RLS・ロールは Prisma スキーマで表現できない**ため、自動生成ではなく手書きSQLを正とする。
 
 ---
 
-## Step 1. `migrations/0001_init.sql` を作成
+## Step 1. `prisma/migrations/<ts>_init/migration.sql` を作成
 
 ```sql
 -- mono-log AWS版 完全スキーマ（v1相当・Cognito/RLS対応）
@@ -267,7 +267,7 @@ create policy listings_delete on public.listings for delete using (exists (selec
 
 ---
 
-## Step 2. `migrations/0002_seed.sql` を作成
+## Step 2. `prisma/migrations/<ts>_seed/migration.sql` を作成
 
 ```sql
 -- マスタ＋プリセットカテゴリの seed。ON CONFLICT DO NOTHING で再実行は no-op。
@@ -484,194 +484,256 @@ export type ListedItem = ItemWithCategories & { listing: Listing | null };
 
 ---
 
-## Step 4. `src/db/schema.ts` を作成
+## Step 4. `prisma/schema.prisma` を作成（イントロスペクション）
 
-```ts
-import {
-  pgTable,
-  pgEnum,
-  uuid,
-  text,
-  timestamp,
-  bigint,
-  varchar,
-  integer,
-  smallint,
-  numeric,
-  boolean,
-  date,
-  primaryKey,
-} from "drizzle-orm/pg-core";
+DBにマイグレーション適用後（Step 6）、`prisma db pull` で既存テーブルから生成し、フィールドを `@map` で **camelCase** に、モデルを PascalCase（`@@map` で実テーブル名へ）に整えます。これが Prisma Client のクエリ型になります。
 
-const timestamps = () => ({
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+```prisma
+// DDL（テーブル/RLS/ロール/トリガ/関数/seed）は prisma/migrations の手書きSQLが正。
+// このスキーマは Prisma Client のクエリ型として使う（イントロスペクション由来）。
+generator client {
+  provider      = "prisma-client-js"
+  // native: ローカル開発 / linux-musl-arm64: 本番Docker(node:22-alpine, t4g/ARM)
+  binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x"]
+}
 
-export const itemStatus = pgEnum("item_status", ["planned", "owned", "listed", "sold"]);
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
 
-export const users = pgTable("users", {
-  id: uuid("id").primaryKey(),
-  email: text("email").notNull().unique(),
-  username: text("username").notNull(),
-  ...timestamps(),
-});
+model User {
+  id        String   @id @db.Uuid
+  email     String   @unique
+  username  String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
 
-export const categories = pgTable("categories", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  color: text("color").notNull().default("#94a3b8"),
-  isPreset: boolean("is_preset").notNull().default(false),
-  ...timestamps(),
-});
+  categories Category[]
+  items      Item[]
 
-export const items = pgTable("items", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  status: itemStatus("status").notNull(),
-  name: varchar("name", { length: 255 }).notNull(),
-  imageUrl: text("image_url"),
-  janCode: varchar("jan_code", { length: 13 }),
-  quantity: integer("quantity").notNull(),
-  notes: text("notes"),
-  actualPrice: integer("actual_price"),
-  purchasedAt: date("purchased_at"),
-  deletedAt: timestamp("deleted_at", { withTimezone: true }),
-  ...timestamps(),
-});
+  @@map("users")
+}
 
-export const itemsCategories = pgTable(
-  "items_categories",
-  {
-    itemId: bigint("item_id", { mode: "number" })
-      .notNull()
-      .references(() => items.id, { onDelete: "cascade" }),
-    categoryId: integer("category_id")
-      .notNull()
-      .references(() => categories.id, { onDelete: "cascade" }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [primaryKey({ columns: [t.itemId, t.categoryId] })],
-);
+model Category {
+  id        Int      @id @default(autoincrement())
+  userId    String?  @map("user_id") @db.Uuid
+  name      String
+  color     String   @default("#94a3b8")
+  isPreset  Boolean  @default(false) @map("is_preset")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
 
-export const plans = pgTable("plans", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  itemId: bigint("item_id", { mode: "number" })
-    .notNull()
-    .unique()
-    .references(() => items.id, { onDelete: "cascade" }),
-  plannedPurchaseYear: smallint("planned_purchase_year"),
-  plannedPurchaseMonth: smallint("planned_purchase_month"),
-  listPrice: numeric("list_price", { mode: "number" }),
-  purchasePrice: numeric("purchase_price", { mode: "number" }),
-  productUrl: text("product_url"),
-  dealPeriod: varchar("deal_period", { length: 255 }),
-  ...timestamps(),
-});
+  user           User?          @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  itemCategories ItemCategory[]
 
-export const platforms = pgTable("platforms", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  name: text("name").notNull().unique(),
-  feeRate: numeric("fee_rate", { mode: "number" }).notNull(),
-  ...timestamps(),
-});
+  @@unique([userId, name])
+  @@index([userId], map: "categories_user_idx")
+  @@map("categories")
+}
 
-export const services = pgTable("services", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  shippingService: text("shipping_service").notNull().unique(),
-  ...timestamps(),
-});
+model Item {
+  id          BigInt     @id @default(autoincrement())
+  userId      String     @map("user_id") @db.Uuid
+  status      ItemStatus
+  name        String     @db.VarChar(255)
+  imageUrl    String?    @map("image_url")
+  janCode     String?    @map("jan_code") @db.VarChar(13)
+  quantity    Int
+  notes       String?
+  actualPrice Int?       @map("actual_price")
+  purchasedAt DateTime?  @map("purchased_at") @db.Date
+  deletedAt   DateTime?  @map("deleted_at") @db.Timestamptz(6)
+  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime   @default(now()) @map("updated_at") @db.Timestamptz(6)
 
-export const sizes = pgTable("sizes", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  shippingSize: text("shipping_size").notNull().unique(),
-  ...timestamps(),
-});
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  itemCategories ItemCategory[]
+  listing        Listing?
+  plan           Plan?
 
-export const shipping = pgTable("shipping", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  shippingServiceId: integer("shipping_service_id")
-    .notNull()
-    .references(() => services.id),
-  shippingSizeId: integer("shipping_size_id")
-    .notNull()
-    .references(() => sizes.id),
-  ...timestamps(),
-});
+  @@index([userId, status, createdAt(sort: Desc)], map: "items_user_status_idx")
+  @@map("items")
+}
 
-export const shippingFees = pgTable("shipping_fees", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  shippingServiceId: integer("shipping_service_id")
-    .notNull()
-    .references(() => services.id),
-  shippingSizeId: integer("shipping_size_id")
-    .notNull()
-    .references(() => sizes.id),
-  fee: numeric("fee", { mode: "number" }).notNull(),
-  ...timestamps(),
-});
+model ItemCategory {
+  itemId     BigInt   @map("item_id")
+  categoryId Int      @map("category_id")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-export const listings = pgTable("listings", {
-  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  itemId: bigint("item_id", { mode: "number" })
-    .notNull()
-    .unique()
-    .references(() => items.id, { onDelete: "cascade" }),
-  shippingId: bigint("shipping_id", { mode: "number" }).references(() => shipping.id),
-  platformId: integer("platform_id").references(() => platforms.id),
-  quantity: integer("quantity"),
-  sellingPrice: numeric("selling_price", { mode: "number" }),
-  packagingCost: numeric("packaging_cost", { mode: "number" }),
-  workTimeHours: numeric("work_time_hours", { mode: "number" }),
-  laborRate: numeric("labor_rate", { mode: "number" }),
-  sellingFee: numeric("selling_fee", { mode: "number" }),
-  workTimeCost: numeric("work_time_cost", { mode: "number" }),
-  operatingBenefit: numeric("operating_benefit", { mode: "number" }),
-  ordinaryProfit: numeric("ordinary_profit", { mode: "number" }),
-  isListing: boolean("is_listing"),
-  ...timestamps(),
-});
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  item     Item     @relation(fields: [itemId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([itemId, categoryId])
+  @@index([categoryId], map: "items_categories_category_idx")
+  @@map("items_categories")
+}
+
+model Plan {
+  id                   BigInt   @id @default(autoincrement())
+  itemId               BigInt   @unique @map("item_id")
+  plannedPurchaseYear  Int?     @map("planned_purchase_year") @db.SmallInt
+  plannedPurchaseMonth Int?     @map("planned_purchase_month") @db.SmallInt
+  listPrice            Decimal? @map("list_price") @db.Decimal(10, 0)
+  purchasePrice        Decimal? @map("purchase_price") @db.Decimal(10, 0)
+  productUrl           String?  @map("product_url")
+  dealPeriod           String?  @map("deal_period") @db.VarChar(255)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("plans")
+}
+
+model Platform {
+  id        Int       @id @default(autoincrement())
+  name      String    @unique
+  feeRate   Decimal   @map("fee_rate") @db.Decimal(5, 4)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  listings  Listing[]
+
+  @@map("platforms")
+}
+
+model Service {
+  id              Int           @id @default(autoincrement())
+  shippingService String        @unique @map("shipping_service")
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime      @default(now()) @map("updated_at") @db.Timestamptz(6)
+  shipping        Shipping[]
+  shippingFees    ShippingFee[]
+
+  @@map("services")
+}
+
+model Size {
+  id           Int           @id @default(autoincrement())
+  shippingSize String        @unique @map("shipping_size")
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime      @default(now()) @map("updated_at") @db.Timestamptz(6)
+  shipping     Shipping[]
+  shippingFees ShippingFee[]
+
+  @@map("sizes")
+}
+
+model Shipping {
+  id                BigInt   @id @default(autoincrement())
+  shippingServiceId Int      @map("shipping_service_id")
+  shippingSizeId    Int      @map("shipping_size_id")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  listings Listing[]
+  service  Service  @relation(fields: [shippingServiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  size     Size     @relation(fields: [shippingSizeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([shippingServiceId, shippingSizeId])
+  @@map("shipping")
+}
+
+model ShippingFee {
+  id                BigInt   @id @default(autoincrement())
+  shippingServiceId Int      @map("shipping_service_id")
+  shippingSizeId    Int      @map("shipping_size_id")
+  fee               Decimal  @db.Decimal(10, 0)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  service Service @relation(fields: [shippingServiceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  size    Size    @relation(fields: [shippingSizeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([shippingServiceId, shippingSizeId])
+  @@map("shipping_fees")
+}
+
+model Listing {
+  id               BigInt   @id @default(autoincrement())
+  itemId           BigInt   @unique @map("item_id")
+  shippingId       BigInt?  @map("shipping_id")
+  platformId       Int?     @map("platform_id")
+  quantity         Int?
+  sellingPrice     Decimal? @map("selling_price") @db.Decimal(10, 0)
+  packagingCost    Decimal? @map("packaging_cost") @db.Decimal(10, 0)
+  workTimeHours    Decimal? @map("work_time_hours") @db.Decimal(8, 2)
+  laborRate        Decimal? @map("labor_rate") @db.Decimal(10, 0)
+  sellingFee       Decimal? @map("selling_fee") @db.Decimal(10, 0)
+  workTimeCost     Decimal? @map("work_time_cost") @db.Decimal(10, 0)
+  operatingBenefit Decimal? @map("operating_benefit") @db.Decimal(10, 0)
+  ordinaryProfit   Decimal? @map("ordinary_profit") @db.Decimal(10, 0)
+  isListing        Boolean? @map("is_listing")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  item     Item      @relation(fields: [itemId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  platform Platform? @relation(fields: [platformId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  shipping Shipping? @relation(fields: [shippingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("listings")
+}
+
+enum ItemStatus {
+  planned
+  owned
+  listed
+  sold
+
+  @@map("item_status")
+}
 ```
 **逐行解説**
-- `import { pgTable, ... } from "drizzle-orm/pg-core"`: 列の型ビルダー群。
-- 列は`型("DB列名", オプション).修飾()`。例`timestamp("created_at", { withTimezone: true }).notNull().defaultNow()`＝`timestamptz not null default now()`。
-- `const timestamps = () => ({ createdAt..., updatedAt... })`: 共通の作成/更新時刻。`...timestamps()`で各テーブルに展開。
-- `pgEnum("item_status", [...])`: Step1の列挙型に対応。
-- `pgTable("users", { id: uuid("id").primaryKey(), email: text("email").notNull().unique(), ... })`: キーは**コード名(camelCase)**、`text("...")`の引数が**DB列名(snake_case)**。
-- `bigint("id", { mode: "number" })`: JSでnumber扱い。`.generatedAlwaysAsIdentity()`=自動採番。
-- `.references(() => users.id, { onDelete: "cascade" })`: FK(連動削除)。
-- `itemsCategories`の第2引数`(t) => [primaryKey({ columns: [t.itemId, t.categoryId] })]`: 複合主キー。
-- `plans`/`listings`の`.unique()`: itemsと1:1。
-- 各列の型・制約は**Step1のSQLと1対1**で対応する（手で合わせる）。
+- `generator client { binaryTargets = [...] }`: Prisma Client を生成。`native`(ローカル)＋`linux-musl-arm64-openssl-3.0.x`(本番Docker)の両エンジンを取得。
+- `datasource db { url = env("DATABASE_URL") }`: 接続先。CLI(`migrate`/`db pull`)が読む（アプリは`db/client.ts`がDB_*から組み立て）。
+- `model User { ... @@map("users") }`: モデル名は PascalCase、`@@map`で実テーブル名へ。
+- 列は`フィールド 型 @map("DB列名") @db.型詳細`。例`createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)`＝`timestamptz not null default now()`。`@map`で**コードはcamelCase / DBはsnake_case**を橋渡し。
+- `id BigInt @id @default(autoincrement())`: `bigint`の自動採番。**返却時はBigInt**なので`serialize`でnumber化（Step 5）。
+- `Decimal? @db.Decimal(10,0)`: `numeric`。**返却時はDecimal**なので`serialize`で`.toNumber()`。
+- `@relation(fields:[..], references:[..], onDelete: Cascade)`: FK（連動削除）。逆side（`Item[]`等）でリレーションを張る。
+- `@@id([itemId, categoryId])`複合主キー、`@unique`(plans/listingsのitemId)で1:1。
+- CHECK制約・部分index・`nulls not distinct`・RLSは Prisma スキーマでは表現されない（Step 1のSQLが正）。`prisma db pull`実行時に警告が出るが無視してよい。
 
 ---
 
 ## Step 5. `src/db/serialize.ts` を作成
 
 ```ts
-import type { InferSelectModel } from "drizzle-orm";
-import { items, categories, plans, listings } from "./schema";
+import { Prisma } from "@prisma/client";
+import type {
+  Item as ItemRow,
+  Category as CategoryRow,
+  Plan as PlanRow,
+  Listing as ListingRow,
+} from "@prisma/client";
 import type { Item, Category, Plan, Listing } from "@/types/item";
 
-type ItemRow = InferSelectModel<typeof items>;
-type CategoryRow = InferSelectModel<typeof categories>;
-type PlanRow = InferSelectModel<typeof plans>;
-type ListingRow = InferSelectModel<typeof listings>;
-
-function iso(v: Date | string): string {
-  return v instanceof Date ? v.toISOString() : v;
+// timestamptz(Date) → ISO 文字列
+function iso(d: Date): string {
+  return d.toISOString();
 }
-function isoOrNull(v: Date | string | null): string | null {
-  if (v == null) return null;
-  return v instanceof Date ? v.toISOString() : v;
+function isoOrNull(d: Date | null): string | null {
+  return d == null ? null : d.toISOString();
+}
+// date 列(Date) → "YYYY-MM-DD"
+function ymdOrNull(d: Date | null): string | null {
+  return d == null ? null : d.toISOString().slice(0, 10);
+}
+// numeric(Decimal) → number
+function decOrNull(d: Prisma.Decimal | null): number | null {
+  return d == null ? null : d.toNumber();
+}
+// bigint → number（NextResponse.json は BigInt で例外になるため）
+function bigToNum(b: bigint): number {
+  return Number(b);
+}
+function bigToNumOrNull(b: bigint | null): number | null {
+  return b == null ? null : Number(b);
 }
 
 export function toItem(r: ItemRow): Item {
   return {
-    id: r.id,
+    id: bigToNum(r.id),
     user_id: r.userId,
     status: r.status,
     name: r.name,
@@ -680,7 +742,7 @@ export function toItem(r: ItemRow): Item {
     quantity: r.quantity,
     notes: r.notes,
     actual_price: r.actualPrice,
-    purchased_at: r.purchasedAt,
+    purchased_at: ymdOrNull(r.purchasedAt),
     deleted_at: isoOrNull(r.deletedAt),
     created_at: iso(r.createdAt),
     updated_at: iso(r.updatedAt),
@@ -701,12 +763,12 @@ export function toCategory(r: CategoryRow): Category {
 
 export function toPlan(r: PlanRow): Plan {
   return {
-    id: r.id,
-    item_id: r.itemId,
+    id: bigToNum(r.id),
+    item_id: bigToNum(r.itemId),
     planned_purchase_year: r.plannedPurchaseYear,
     planned_purchase_month: r.plannedPurchaseMonth,
-    list_price: r.listPrice,
-    purchase_price: r.purchasePrice,
+    list_price: decOrNull(r.listPrice),
+    purchase_price: decOrNull(r.purchasePrice),
     product_url: r.productUrl,
     deal_period: r.dealPeriod,
     created_at: iso(r.createdAt),
@@ -716,19 +778,19 @@ export function toPlan(r: PlanRow): Plan {
 
 export function toListing(r: ListingRow): Listing {
   return {
-    id: r.id,
-    item_id: r.itemId,
-    shipping_id: r.shippingId,
+    id: bigToNum(r.id),
+    item_id: bigToNum(r.itemId),
+    shipping_id: bigToNumOrNull(r.shippingId),
     platform_id: r.platformId,
     quantity: r.quantity,
-    selling_price: r.sellingPrice,
-    packaging_cost: r.packagingCost,
-    work_time_hours: r.workTimeHours,
-    labor_rate: r.laborRate,
-    selling_fee: r.sellingFee,
-    work_time_cost: r.workTimeCost,
-    operating_benefit: r.operatingBenefit,
-    ordinary_profit: r.ordinaryProfit,
+    selling_price: decOrNull(r.sellingPrice),
+    packaging_cost: decOrNull(r.packagingCost),
+    work_time_hours: decOrNull(r.workTimeHours),
+    labor_rate: decOrNull(r.laborRate),
+    selling_fee: decOrNull(r.sellingFee),
+    work_time_cost: decOrNull(r.workTimeCost),
+    operating_benefit: decOrNull(r.operatingBenefit),
+    ordinary_profit: decOrNull(r.ordinaryProfit),
     is_listing: r.isListing,
     created_at: iso(r.createdAt),
     updated_at: iso(r.updatedAt),
@@ -736,36 +798,41 @@ export function toListing(r: ListingRow): Listing {
 }
 ```
 **逐行解説**
-- このファイルは**camelCase(Drizzle結果) → snake_case(アプリ型)変換層**。これにより画面/APIの型を変えずにバックエンドを差し替えられる。
-- `import type { InferSelectModel } from "drizzle-orm"`: テーブル定義から「SELECT結果の型」を導出するユーティリティ型。
-- `type ItemRow = InferSelectModel<typeof items>`: itemsの行型(camelCase・日時はDate)。
-- `iso(v)`: `Date`ならISO文字列、文字列ならそのまま。`isoOrNull`はnull許容版。
-- `toItem(r)`: Drizzle行`r`を`Item`型へ詰め替え。`r.userId → user_id`、`r.imageUrl → image_url`等。`purchased_at`はdate型で既に"YYYY-MM-DD"文字列なのでそのまま、`deleted_at`/`created_at`/`updated_at`は`iso`系で文字列化。
-- `toCategory`/`toPlan`/`toListing`も同じ要領（列名をsnake_caseに直し、日時をiso化）。
+- このファイルは**Prisma行(camelCase・BigInt/Decimal/Date) → アプリ型(snake_case・number・文字列)変換層**。画面/APIの型を変えずにバックエンドを差し替えられる。
+- `import type { Item as ItemRow, ... } from "@prisma/client"`: 生成済みモデル行型をエイリアスでimport（`@/types/item`の同名型と衝突しないよう別名に）。
+- `bigToNum`/`bigToNumOrNull`: **BigInt→number**。`NextResponse.json`はBigIntで例外になるため必須。
+- `decOrNull`: **Decimal→number**（`.toNumber()`）。`ymdOrNull`: date列の`Date`→`"YYYY-MM-DD"`。`iso`/`isoOrNull`: timestamptzの`Date`→ISO文字列。
+- `toItem(r)`: `r.userId→user_id`等の詰め替え＋上記変換。`toCategory`/`toPlan`/`toListing`も同様（idはBigInt→number、金額はDecimal→number）。
 
 ---
 
-## Step 6. ローカル適用＆型チェックで確認
+## Step 6. ローカル適用＆Client生成＆型チェック
 
 ```bash
-# ローカルDB（9章で compose 起動済み前提）にスキーマ＋seedを適用
-docker run --rm -e PGPASSWORD=localdev -v "$PWD/migrations:/m" --network host postgres:16 \
-  psql -h localhost -p 5433 -U monolog_admin -d monolog -v ON_ERROR_STOP=1 \
-  -f /m/0001_init.sql -f /m/0002_seed.sql
+# 所有者(monolog_admin)のURLで Prisma Migrate を適用（スキーマ/RLS/ロール → マスタ/seed）
+DATABASE_URL="postgresql://monolog_admin:localdev@localhost:5433/monolog" npx prisma migrate deploy
 
-# 型チェック（schema/serialize/types と付録Bが揃っていれば通る）
+# 既存DBから schema.prisma を生成（Step 4の形に camelCase 整形）。初回のみ
+# DATABASE_URL="postgresql://monolog_admin:localdev@localhost:5433/monolog" npx prisma db pull
+
+# Prisma Client を生成（型・クエリエンジン）
+npx prisma generate
+
+# 型チェック（schema.prisma/serialize/types と付録Bが揃っていれば通る）
 npx tsc --noEmit
 ```
 **逐行解説**
-- `docker run --rm -e PGPASSWORD=localdev -v "$PWD/migrations:/m" --network host postgres:16 psql ...`: 使い捨ての`postgres:16`コンテナで`psql`を実行。`-v`でmigrationsをマウント、`--network host`でローカルの5433に接続、`-U monolog_admin`(所有者)、`-v ON_ERROR_STOP=1`でエラー即停止、`-f`で2本適用。
+- `prisma migrate deploy`: `prisma/migrations`のSQLを順に適用。`DATABASE_URL`は所有者(`monolog_admin`)を指す（DDL/ロール作成のため）。
 - 適用後、`monolog_app`ロールが初期パスワード`localapppw`で作られる(`.env.local`の`DB_PASSWORD=localapppw`と一致)。
+- `prisma db pull`: 既存DBから`schema.prisma`を生成（Step 4の camelCase 整形は初回に1回）。以後スキーマ変更時に再実行。
+- `prisma generate`: `@prisma/client`の型・クエリエンジンを生成。`npm install`では自動実行されない。
 - `npx tsc --noEmit`: 型エラーが無いか確認。
 
 ---
 
 ## Step 7. `infra/migrate.ps1` を作成（本番RDSへの適用）
 
-RDSは非公開なので、SQLをS3経由でEC2に渡し、EC2の`psql`コンテナからRDSへ適用する。**RDSを作り直すたびに1回**実行（11章）。コメントはASCII（Windows PowerShell 5.1の文字化け回避）。
+RDSは非公開でローカルから到達できず`prisma migrate deploy`を直接打てないため、**`prisma/migrations`のSQLをS3経由でEC2に渡し、EC2の`psql`コンテナからRDSへ適用**する（適用される内容は`migrate deploy`と同一）。**RDSを作り直すたびに1回**実行（11章）。コメントはASCII（Windows PowerShell 5.1の文字化け回避）。
 
 ```powershell
 # First-time DB migration to RDS (0001_init.sql / 0002_seed.sql) + set monolog_app password.
@@ -784,8 +851,8 @@ $Prefix = "_deploy/migrations"
 $Bucket = (& $aws ssm get-parameter --region $Region --name "/$Project/s3/bucket" --query Parameter.Value --output text)
 
 Write-Host "== upload migration SQL to S3 =="
-& $aws s3 cp "$RepoRoot/migrations/0001_init.sql" "s3://$Bucket/$Prefix/0001_init.sql" --region $Region
-& $aws s3 cp "$RepoRoot/migrations/0002_seed.sql" "s3://$Bucket/$Prefix/0002_seed.sql" --region $Region
+& $aws s3 cp "$RepoRoot/prisma/migrations/20260613000000_init/migration.sql" "s3://$Bucket/$Prefix/0001_init.sql" --region $Region
+& $aws s3 cp "$RepoRoot/prisma/migrations/20260613000100_seed/migration.sql" "s3://$Bucket/$Prefix/0002_seed.sql" --region $Region
 
 Write-Host "== find EC2 instance =="
 $Instance = (& $aws ec2 describe-instances --region $Region `
