@@ -1,97 +1,104 @@
 # mono-log
 
-所有物管理アプリ。Next.js (App Router) + TypeScript + Tailwind + Supabase (Auth / Postgres / Storage)。
+所有物・購入予定・出品をまとめて管理するアプリ。Next.js (App Router) + React + TypeScript / Server Actions + REST API。バックエンドは **AWS ネイティブ**（Cognito 認証 / RDS PostgreSQL + Prisma + RLS / S3）。
+
+## 技術スタック
+
+| 領域 | 採用 |
+| --- | --- |
+| フロント/サーバ | Next.js 15 (App Router) / React 19 / TypeScript / Server Actions / CSS Modules |
+| 認証 | Amazon Cognito（JWT 発行・`aws-jwt-verify` で検証・httpOnly Cookie・middleware で自動更新） |
+| DB | RDS PostgreSQL。**Prisma Client**（クエリ）/ **Prisma Migrate**（DDL・RLS・seed の手書きSQL） |
+| 認可 | 非所有者ロール `monolog_app` で接続し、トランザクション内 `set_config('app.current_user_id', …)` で **行レベルセキュリティ(RLS)** |
+| 画像 | S3（非公開）＋ 署名付き URL |
+| API | 外部向け REST `/api/v1`（Cognito の Bearer トークン認証） |
+| ホスティング | EC2 + Docker + CloudFront。IaC は **Terraform**。ローカルは Docker の PostgreSQL |
 
 ## 機能
 
-- メール+パスワード認証（Supabase Auth）
-- アイテムの CRUD（名前・カテゴリ・タグ・購入日・価格・メモ・画像）
-- カテゴリは自分用に作成・選択（同名 unique）。新規追加もフォームから可能
-- 一覧でのキーワード検索（名前・メモ・タグ）／カテゴリ絞り込み（「未分類」も指定可）
-- ダッシュボード：登録数 / 合計金額 / 平均 / カテゴリ別の数と金額バー
-- JSON エクスポート／インポート（アイテム + カテゴリ。画像はパスのみ）
+- **アイテム管理**: 名前・カテゴリ・JANコード・数量・購入価格・購入日・メモ・画像。状態は **購入予定 / 所有 / 出品中 / 売却**
+- **状態遷移**: 購入予定→所有（購入済み）、所有→出品、出品→売却（論理削除）/ 出品取り下げ、など
+- **カテゴリ**: プリセット＋自分用に作成。一覧でキーワード検索（名前・メモ）／カテゴリ絞り込み（「未分類」も指定可）
+- **ダッシュボード**: 登録数 / 合計金額 / 平均 / カテゴリ別の数と金額バー
+- **購入予定リスト**: 購入予定年月・定価・購入予定価格・商品リンク・お買い得期間
+- **出品リスト**: 販売手数料・送料・作業時間コストを含む**損益を自動計算**し、出品可否を判定
+- **マイページ**: プロフィール編集・メールアドレス変更・パスワード変更・退会
+- **JSON エクスポート / インポート**（アイテム＋カテゴリ）
+- **REST API**: items / categories / export（モバイル・外部連携向け）
 
-## セットアップ
+## セットアップ（ローカル開発）
 
-### 1. Supabase プロジェクトを用意
-
-[Supabase](https://supabase.com/) で新規プロジェクトを作成し、`Settings → API` から下記2つを控える。
-
-- Project URL
-- `anon`（または `publishable`）key
-
-### 2. スキーマを適用
-
-`supabase/migrations/0001_initial_schema.sql` を Supabase Dashboard の `SQL Editor` に貼り付けて実行。
-
-このマイグレーションで以下が作成されます。
-
-- テーブル: `public.categories` / `public.items`（いずれも RLS 有効・`auth.uid()` ベース）
-- ストレージ: `item-images` バケット（非公開）と `<user_id>/<item_id>/...` の所有者ポリシー（SELECT / INSERT / UPDATE / DELETE）
-- トリガ: `items.updated_at` の自動更新
-
-### 3. 認証設定
-
-`Authentication → Providers → Email` を有効化。  
-メール確認が `ON` の場合、サインアップ直後はログインできず確認メール内のリンクを踏む必要があります。コールバック URL は
-
-```
-http://localhost:3000/auth/callback
-```
-
-を `Authentication → URL Configuration → Redirect URLs` に追加してください。
-
-### 4. 環境変数
+最短手順（詳細・本番デプロイは [docs/setup-guide.md](docs/setup-guide.md)）:
 
 ```bash
-cp .env.local.example .env.local
-# NEXT_PUBLIC_SUPABASE_URL と NEXT_PUBLIC_SUPABASE_ANON_KEY を埋める
-```
+# 1. ローカル DB（PostgreSQL）を起動
+docker compose up -d
 
-### 5. インストール & 起動
+# 2. マイグレーション適用（所有者 URL で Prisma Migrate）
+DATABASE_URL="postgresql://monolog_admin:localdev@localhost:5433/monolog" npx prisma migrate deploy
 
-```bash
+# 3. 依存導入 & Prisma Client 生成
 npm install
+npx prisma generate
+
+# 4. 環境変数（AWS版テンプレートをコピーして埋める）
+cp .env.local.example .env.local
+#   DB_* / AWS_REGION / COGNITO_USER_POOL_ID / COGNITO_CLIENT_ID / S3_IMAGE_BUCKET
+
+# 5. 起動
 npm run dev
 # http://localhost:3000
 ```
 
+> 注: 認証(Cognito)と画像(S3)は**実物の AWS リソース**を参照します。これらは Terraform で作成します（[docs/setup-guide.md](docs/setup-guide.md) の10章）。DB だけ確認するなら4までで進められます。
+
+## ドキュメント
+
+- [docs/setup-guide.md](docs/setup-guide.md) … ゼロから本番デプロイまでの手順（付録A: Terraform / B: 中核コード / C: REST API / D: データ基盤）
+- [docs/infra-design.md](docs/infra-design.md) … インフラ設計（AWS構成と **Vercel 代替案**）
+- [docs/db-design.md](docs/db-design.md) … DB スキーマ設計
+- [docs/api-reference.md](docs/api-reference.md) … REST API 仕様（エンドポイント・curl例）
+
 ## ディレクトリ構成
 
 ```
+prisma/
+  schema.prisma           Prisma のテーブル定義（クエリ型。db pull 由来・@map で camelCase）
+  migrations/             DDL＋RLS＋ロール＋seed の手書きSQL（Prisma Migrate 管理）
 src/
+  middleware.ts           全リクエスト前処理（トークン期限切れ時の自動リフレッシュ）
   app/
-    layout.tsx          ルートレイアウト + NavBar
-    page.tsx            一覧（検索・フィルタ）
-    login/, signup/     認証フォーム + Server Actions
-    auth/callback       メール確認後の Code 交換
-    auth/signout        ログアウト POST
-    items/
-      actions.ts        create / update / delete
-      new/              追加ページ
-      [id]/edit/        編集ページ
-    dashboard/          集計
-    import/             JSON 取り込み
-    api/export/         JSON ダウンロード
-  components/           UI (item-card / item-form / filter-bar / nav-bar)
+    page.tsx              ランディング
+    login/ signup/ confirm/   認証画面
+    auth/actions.ts       サインアップ/ログイン/ログアウト（Server Actions）
+    items/                一覧/詳細/新規/編集/状態遷移
+    items/actions.ts      アイテム CRUD（RLS 下で create/update/delete）
+    dashboard/ mypage/    集計 / マイページ（退会・メール変更）
+    import/               JSON 取り込み
+    api/export/route.ts   JSON ダウンロード（Cookie 認証）
+    api/v1/               外部向け REST API（Bearer 認証）items/categories/export
+  components/             UI（item-card / item-form / nav-bar / filter-bar）
+  db/
+    client.ts             Prisma Client（遅延生成）＋ withUser（RLS コンテキスト実行）
+    serialize.ts          Prisma 行（BigInt/Decimal/Date）→ アプリ型（number/文字列）変換
   lib/
-    supabase/{client,server,middleware}.ts   @supabase/ssr 標準パターン
-    image.ts            署名付き URL 生成
-    format.ts           ¥ / 日付フォーマット
-  middleware.ts         セッション更新と未ログイン時のリダイレクト
-  types/item.ts
-supabase/migrations/0001_initial_schema.sql
+    auth/cognito.ts       Cognito SDK ラッパ + JWT 検証
+    auth/session.ts       httpOnly Cookie でトークン保持
+    auth/api.ts           REST API の Bearer 認証ヘルパ
+    api/items.ts          REST API の items 入力検証・整形
+    image.ts              S3 への保存/削除/署名付き URL
+    listing-calc.ts       出品の損益計算
+    format.ts             表示整形
+  types/item.ts           アプリ共通の型
+infra/                    Terraform（VPC/Cognito/RDS/S3/ECR/EC2/CloudFront/SSM/IAM）
 ```
 
-## セキュリティ上の方針
+## セキュリティ方針
 
-このコードは Supabase の標準セキュリティ手順に沿って書かれています。
-
-- `public` の全テーブルで RLS 有効、ポリシーは `TO authenticated` + `(select auth.uid()) = user_id` ペア（BOLA 回避）
-- UPDATE ポリシーは `USING` と `WITH CHECK` を両方指定（行の所有者変更を防止）
-- Storage バケット `item-images` は非公開で、所有者の `<user_id>/...` プレフィックスでのみ操作可。upsert を将来許す場合に備え SELECT / INSERT / UPDATE / DELETE を揃えています
-- `service_role` キーは使用しません（クライアント・サーバ共に `anon` キーのみ）
-- 認可判定に `user_metadata` を使いません
+- アプリは **非所有者ロール `monolog_app`** で DB に接続し、各操作を `withUser(sub, fn)`（トランザクション内 `set_config(..., true)`）で包む。RLS ポリシーは `user_id = app.current_user_id()` で**自分の行だけ**に制限（オブジェクトレベル認可）。
+- 認証は **Cognito**。ID トークンは **JWKS** で署名検証し、トークンは httpOnly Cookie に保存。失効時は middleware が自動リフレッシュ。
+- 画像は**非公開 S3** ＋ 署名付き URL（直リンク不可）。
+- 本番 DB 接続は **SSL 必須**（`sslmode=require`）。EC2 は IAM ロールで最小権限（SSM 読取 / S3 オブジェクト RW / Cognito `AdminGetUser`）。機密は SSM Parameter Store（SecureString）で管理し、コードに秘密を書かない。
 
 ## 既知の制限
 
