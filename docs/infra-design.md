@@ -169,40 +169,99 @@ Docker: node server.js
 
 ## 9. 代替案: Vercel 版
 
-Next.js を最も手軽にホスティングするなら Vercel が選択肢になる。ただし「サーバーレス」と「private RDS」に起因する固有の対応が必要で、現 EC2 構成の利点（VPC内直結・常駐プール）を一部手放すことになる。**現状は採用しない**が、構成案として記録する。
+Next.js を最も手軽にホスティングするなら Vercel が選択肢になる。ただし「サーバーレス」と「private RDS」に起因する固有の対応が必要で、現 EC2 構成の利点（VPC内直結・常駐プール）を一部手放すことになる。**現状は採用しない**が、構成案として AWS(EC2)版との差分を含めて記録する。
 
-### 9.1 構成イメージ
+### 9.1 構成図
 ```
-  ブラウザ ──HTTPS──▶ Vercel（Next.js ネイティブビルド / Edge middleware / Serverless Functions）
-                          ├──▶ Cognito（変更なし）
-                          ├──▶ S3（変更なし・署名付きURL）
-                          └──▶ 接続プーラ ──▶ RDS PostgreSQL
-                               (RDS Proxy / Prisma Accelerate / PgBouncer)
+                 HTTPS
+  ブラウザ ───────────▶  Vercel
+                         ├─ Edge: middleware（認可・トークン自動更新）
+                         ├─ Serverless Functions:
+                         │    Server Components / Server Actions / Route Handlers(/api/v1)
+                         │
+                         ├──▶ Cognito（変更なし・JWT発行/検証）
+                         ├──▶ S3（変更なし・署名付きURL）
+                         └──▶ 接続プーラ ──▶ RDS PostgreSQL
+                              (Prisma Accelerate / RDS Proxy / PgBouncer)
+
+  ※ CloudFront / EC2 / ECR / Docker / SSM は使わない。
+     CDN/TLS は Vercel が内包、設定は Vercel の環境変数。
 ```
-- Vercel が Next.js を**ネイティブにビルド**するため、`Dockerfile` / `output: "standalone"` / EC2 / CloudFront は**使わない**。
-- middleware は Vercel Edge でネイティブ動作（現実装は `fetch` ベースなのでそのまま動く）。
-- Cognito・S3 は AWS のまま利用（変更不要）。
 
-### 9.2 必要になる対応（ここが肝）
-1. **RDS への到達性**: Vercel の関数は AWS の VPC 外で動くため、private RDS に直接届かない。
-   - RDS を**公開**（publicly accessible + SG で送信元制限）、または **RDS Proxy / 専用プーラ**を VPC 前段に置いてエンドポイントを公開する。
-2. **コネクションプーリング**: サーバーレスはリクエスト毎に関数が増える＝**接続が急増**する。
-   - **Prisma Accelerate** か **RDS Proxy / PgBouncer（transaction モード）**を挟み、`DATABASE_URL` をプーラ経由にする。
-   - RLS の `withUser`（`$transaction` + `set_config(..., true)`）は**トランザクション単位**で完結するため、transaction プーリングでも成立する。
-3. **環境変数**: `DB_*` / `AWS_REGION` / `COGNITO_*` / `S3_IMAGE_BUCKET` を Vercel のプロジェクト設定に登録。SSL は Prisma の `sslmode=require`。
-4. **Prisma エンジン**: Vercel は `prisma generate` を自動で実行（`postinstall` か build 前）。binaryTargets に Vercel ランタイム向け（`rhel-openssl-3.0.x` 等）を追加する。
+```mermaid
+graph TD
+  U[User] --> V[Vercel]
+  subgraph V[Vercel]
+    EDGE[Edge: middleware]
+    FN[Serverless Functions: SSR/Actions/API]
+  end
+  V -->|サインアップ/ログイン/JWKS| COG[Cognito User Pool]
+  V -->|presigned URL| S3I[S3 item-images]
+  V -->|DATABASE_URL プーラ経由| POOL[接続プーラ Accelerate/RDS Proxy]
+  POOL --> RDS[(RDS PostgreSQL)]
+```
 
-### 9.3 トレードオフ
+### 9.2 AWS(EC2)版との差分（レイヤー別・全項目）
+
+| レイヤー | 現状（AWS / EC2・Docker） | Vercel 版 | 差分の要点 |
+| --- | --- | --- | --- |
+| ホスティング | EC2 1台で `node server.js`（常駐） | Vercel の Serverless Functions（リクエスト毎に起動） | 常駐 → サーバーレス |
+| ビルド/パッケージ | Dockerfile(multi-stage) + `output:"standalone"` | Vercel がネイティブビルド | **Dockerfile/standalone/ECR/`docker buildx` は不要** |
+| 配信・TLS | CloudFront（オリジン=EC2・HTTP） | Vercel が内包（エッジCDN+TLS） | **CloudFront 不要** |
+| middleware | CloudFront 経由で Edge ランタイム | Vercel Edge ネイティブ | `fetch`ベースなので**コード変更なしで動く** |
+| DBドライバ | Prisma（常駐プロセスから直結） | Prisma（プーラ経由） | クエリコードは同じ。接続経路が変わる |
+| DB到達性 | 同一VPC内で private RDS に直結 | VPC外 → **RDS公開 or プロキシ公開** | ネットワーク設計の最大差分 |
+| コネクション | 常駐プロセスでプール再利用 | リクエスト急増 → **外部プーラ必須** | Accelerate / RDS Proxy / PgBouncer(transaction) |
+| 接続URL | `db/client.ts` が `DB_*` から組み立て | 同左（host をプーラに） | `DB_HOST`/`DATABASE_URL` をプーラのエンドポイントに |
+| RLS（set_config） | `withUser`=`$transaction`+`set_config(...,true)` | 同左（**変更不要**） | transactionプーリングでも1TX単位で成立（9.4） |
+| Prismaエンジン | Docker内 `prisma generate`(linux-musl-arm64) | Vercel build で `prisma generate`(`rhel-openssl-3.0.x`) | **binaryTargets を Vercel ランタイム向けに変更** |
+| 認証（Cognito） | 変更なし | 変更なし | そのまま |
+| 画像（S3）認証 | EC2の**IAMロール**で自動取得 | **IAMロール不可** → IAMユーザのアクセスキーを env に | Vercelは静的キーが必要（最小権限） |
+| 設定/機密 | SSM Parameter Store（IAMロールで取得） | Vercel の環境変数 | **SSM 不要**。値は Vercel プロジェクト設定へ |
+| DBマイグレーション | private RDS のため EC2+psql で適用 | RDS到達可なら `prisma migrate deploy` を直接実行 | CI から流せる |
+| IaC（Terraform範囲） | VPC〜CloudFront を一括構築 | RDS+プーラ+Cognito+S3 のみ | **VPC/EC2/CloudFront/ECR が不要**で縮小 |
+| CI/CD | build→ECR push→SSMで起動（手動寄り） | **git push で自動**＋ブランチごとプレビュー | 運用が大幅簡素化 |
+| 監視 | CloudWatch | Vercel ログ/メトリクス（+ RDSはCloudWatch） | ログ基盤が分かれる |
+
+### 9.3 必要になる対応（実装/設定）
+1. **RDS到達性**: RDS を publicly accessible にし SG で送信元を絞る、または **RDS Proxy / プーラ**を VPC 前段に置きエンドポイントを公開。
+2. **プーリング**: `DATABASE_URL` を **Prisma Accelerate** か **RDS Proxy / PgBouncer(transaction)** 経由に。Accelerate 利用時は `@prisma/extension-accelerate` を導入。
+3. **S3認証**: EC2のIAMロールが無いため、**S3用IAMユーザのアクセスキー**を `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` として Vercel env に登録（S3オブジェクトRWのみの最小権限）。
+4. **環境変数**: `DB_*`(hostはプーラ) / `AWS_REGION` / `COGNITO_USER_POOL_ID` / `COGNITO_CLIENT_ID` / `S3_IMAGE_BUCKET` ＋上記S3キーを Vercel に登録。SSLは `sslmode=require`。
+5. **Prismaエンジン**: `schema.prisma` の `binaryTargets` に Vercel ランタイム向け(`rhel-openssl-3.0.x`/`native`)を設定。`prisma generate` は Vercel の build/`postinstall` で実行。
+6. **不要化**: `Dockerfile` / `infra/compute.tf`(EC2) / `infra/cdn.tf`(CloudFront) / `infra/ecr.tf` / `migrate.ps1` / `deploy.ps1` は使わない（Terraform は RDS+プーラ+Cognito+S3 に縮小）。
+
+### 9.4 RLS が serverless でも成立する理由
+`withUser` は `prisma.$transaction(async tx => { await tx.$executeRaw\`select set_config('app.current_user_id', ${sub}, true)\`; ... })` の形で、**1トランザクション内で set_config(LOCAL) → クエリ**が完結する。transaction モードのプーラ（PgBouncer/RDS Proxy/Accelerate）は1トランザクションを1物理接続に固定するため、`SET LOCAL` 相当の設定がそのトランザクション内で保たれる。**コード変更は不要**。
+
+### 9.5 デプロイ手順（Vercel 版）
+1. Terraform で **RDS + プーラ + Cognito + S3** を作成（VPC/EC2/CloudFront/ECRは作らない）。
+2. `prisma migrate deploy` でスキーマ適用（RDS到達可のため直接実行）＋`monolog_app` パスワード設定。
+3. Vercel に GitHub リポジトリを連携し、**環境変数**（9.3）を登録。
+4. `git push`（main）で自動ビルド・デプロイ。プレビュー環境はブランチごとに自動生成。
+
+### 9.6 コスト（小規模）
+| 項目 | 月額目安 |
+| --- | --- |
+| Vercel | Hobby $0（非商用）/ Pro $20〜 |
+| RDS `db.t4g.micro` | 約 $13〜15 |
+| 接続プーラ | Prisma Accelerate 無料枠〜 / RDS Proxy 約$11〜（vCPU課金） |
+| S3 | 数十円 |
+
+> CloudFront/EC2が無くなる一方、**プーラ費用と RDS 公開の運用**が増える。RDS Proxy は割高になりやすく、小規模では Prisma Accelerate（無料枠あり）が手軽。
+
+### 9.7 トレードオフ（まとめ）
 | 観点 | 現状（EC2/Docker） | Vercel |
 | --- | --- | --- |
-| デプロイ/CI | terraform + build/push（手動寄り） | git push で自動 |
+| デプロイ/CI | terraform + build/push（手動寄り） | git push で自動・プレビュー環境 |
 | スケール | 手動（→Fargate） | 自動 |
 | RDS到達性 | 同一VPCで private のまま | 公開 or プロキシが必要 |
-| 接続 | 常駐プールで安定 | プーラ必須（Accelerate/Proxy） |
-| インフラ管理 | 自前（VPC/EC2/CloudFront） | ほぼ不要 |
-| コスト | EC2+RDS 固定費 | Vercel(Hobby/Pro) + RDS + プーラ |
+| 接続 | 常駐プールで安定 | 外部プーラ必須 |
+| シークレット | SSM＋IAMロール | Vercel env＋IAMユーザのキー |
+| インフラ管理 | 自前（VPC/EC2/CloudFront） | RDS+プーラのみ |
+| コスト | EC2+RDS 固定費 | Vercel + RDS + プーラ |
 
-> まとめ: Vercel は運用が圧倒的に楽だが、**private RDS の到達性とサーバーレスのコネクション問題**を別途解く必要がある。VPC 内で完結させたい/接続を常駐プールで安定させたい場合は現 EC2 構成が有利。
+> まとめ: Vercel は運用が楽（自動デプロイ・自動スケール・CDN内包）だが、**private RDS の到達性・サーバーレスの接続プーリング・IAMロールの代替(静的キー)**を解く必要がある。VPC内で完結させ接続を常駐プールで安定させたい場合は現 EC2 構成が有利。
 
 ---
 
