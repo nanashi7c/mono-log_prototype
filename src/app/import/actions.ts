@@ -4,6 +4,8 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { getCurrentUser } from "@/lib/auth/session";
 import { withUser } from "@/db/client";
+import { parseActualPrice } from "@/lib/validation/actual-price";
+import { INTEGER_MAX, parseOptionalInteger } from "@/lib/validation/numeric";
 import type { ItemStatus } from "@/types/item";
 
 const STATUSES: ItemStatus[] = ["planned", "owned", "listed", "sold"];
@@ -24,17 +26,6 @@ function asString(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const s = v.trim();
   return s ? s : null;
-}
-
-function asNonNegInt(v: unknown): number | null {
-  if (typeof v !== "number" || !Number.isFinite(v)) return null;
-  const n = Math.floor(v);
-  return n >= 0 ? n : null;
-}
-
-function asPosInt(v: unknown): number | null {
-  const n = asNonNegInt(v);
-  return n != null && n > 0 ? n : null;
 }
 
 export async function importBackup(formData: FormData) {
@@ -97,6 +88,18 @@ export async function importBackup(formData: FormData) {
       for (const it of rawItems) {
         const name = asString(it.name);
         if (!name) continue;
+        const actualPrice = parseActualPrice(it.actual_price);
+        if (!actualPrice.ok) {
+          throw new Error(`「${name}」: ${actualPrice.error}`);
+        }
+        const quantityResult = parseOptionalInteger(it.quantity, {
+          label: "数量",
+          min: 1,
+          max: INTEGER_MAX,
+        });
+        if (!quantityResult.ok) {
+          throw new Error(`「${name}」: ${quantityResult.error}`);
+        }
         const statusRaw = String(it.status ?? "");
         const status: ItemStatus = (STATUSES as string[]).includes(statusRaw)
           ? (statusRaw as ItemStatus)
@@ -108,9 +111,9 @@ export async function importBackup(formData: FormData) {
             status,
             name,
             janCode: asString(it.jan_code),
-            quantity: asPosInt(it.quantity) ?? 1,
+            quantity: quantityResult.value ?? 1,
             notes: asString(it.notes),
-            actualPrice: asNonNegInt(it.actual_price),
+            actualPrice: actualPrice.value,
             purchasedAt: purchased ? new Date(purchased) : null,
           },
           select: { id: true },

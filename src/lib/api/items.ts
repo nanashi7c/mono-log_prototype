@@ -1,6 +1,12 @@
 // REST API(items) で使う検証・整形ロジック。route ハンドラ間で共有する。
 import type { Tx } from "@/db/client";
 import type { ItemStatus } from "@/types/item";
+import { parseActualPrice } from "@/lib/validation/actual-price";
+import {
+  INTEGER_MAX,
+  parseOptionalInteger,
+  parseRequiredInteger,
+} from "@/lib/validation/numeric";
 
 export const ITEM_STATUSES: ItemStatus[] = ["planned", "owned", "listed", "sold"];
 
@@ -53,30 +59,34 @@ export function parseItemBody(
     status = b.status as ItemStatus;
   }
 
-  let quantity = 1;
-  if (b.quantity !== undefined) {
-    const q = Number(b.quantity);
-    if (!Number.isInteger(q) || q <= 0) {
-      return { ok: false, error: "quantity must be a positive integer" };
-    }
-    quantity = q;
-  }
+  const quantityResult = parseOptionalInteger(b.quantity, {
+    label: "quantity",
+    min: 1,
+    max: INTEGER_MAX,
+  });
+  if (!quantityResult.ok) return quantityResult;
+  const quantity = quantityResult.value ?? 1;
 
   const strOrNull = (v: unknown): string | null => {
     if (v == null) return null;
     const s = String(v).trim();
     return s === "" ? null : s;
   };
-  const nonNegIntOrNull = (v: unknown): number | null => {
-    if (v == null || v === "") return null;
-    const n = Number(v);
-    return Number.isInteger(n) && n >= 0 ? n : null;
-  };
+  const actualPrice = parseActualPrice(b.actual_price);
+  if (!actualPrice.ok) return { ok: false, error: actualPrice.error };
 
   let categoryIds: number[] = [];
   if (b.category_ids !== undefined) {
     if (!Array.isArray(b.category_ids)) return { ok: false, error: "category_ids must be an array" };
-    categoryIds = b.category_ids.map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0);
+    for (const value of b.category_ids) {
+      const categoryId = parseRequiredInteger(value, {
+        label: "category_ids",
+        min: 1,
+        max: INTEGER_MAX,
+      });
+      if (!categoryId.ok) return categoryId;
+      categoryIds.push(categoryId.value);
+    }
   }
 
   return {
@@ -87,7 +97,7 @@ export function parseItemBody(
       janCode: strOrNull(b.jan_code),
       quantity,
       notes: strOrNull(b.notes),
-      actualPrice: nonNegIntOrNull(b.actual_price),
+      actualPrice: actualPrice.value,
       purchasedAt: strOrNull(b.purchased_at),
       categoryIds,
     },
