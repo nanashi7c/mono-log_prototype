@@ -6,6 +6,16 @@ import { getCurrentUser } from "@/lib/auth/session";
 import { withUser, type Tx } from "@/db/client";
 import { putImage, deleteImage } from "@/lib/image";
 import { computeListingMetrics } from "@/lib/listing-calc";
+import { parseActualPrice } from "@/lib/validation/actual-price";
+import {
+  DECIMAL_8_2_MAX,
+  DECIMAL_10_0_MAX,
+  INTEGER_MAX,
+  fitsSignedDecimal10,
+  parseOptionalDecimal,
+  parseOptionalInteger,
+  parseRequiredInteger,
+} from "@/lib/validation/numeric";
 import type { ItemStatus } from "@/types/item";
 
 const STATUSES: ItemStatus[] = ["planned", "owned", "listed"];
@@ -45,84 +55,167 @@ type ParsedForm = {
   };
 };
 
-function intOrNull(v: FormDataEntryValue | null): number | null {
-  if (v == null) return null;
-  const s = String(v).trim();
-  if (s === "") return null;
-  const n = Math.floor(Number(s));
-  return Number.isFinite(n) ? n : null;
-}
-
-function nonNegIntOrNull(v: FormDataEntryValue | null): number | null {
-  const n = intOrNull(v);
-  return n != null && n >= 0 ? n : null;
-}
-
 function strOrNull(v: FormDataEntryValue | null): string | null {
   if (v == null) return null;
   const s = String(v).trim();
   return s === "" ? null : s;
 }
 
-function parseForm(formData: FormData): ParsedForm {
+function parseForm(
+  formData: FormData,
+): { ok: true; value: ParsedForm } | { ok: false; error: string } {
+  const actualPrice = parseActualPrice(formData.get("actual_price"));
+  if (!actualPrice.ok) return actualPrice;
+
+  const quantityResult = parseOptionalInteger(formData.get("quantity"), {
+    label: "数量",
+    min: 1,
+    max: INTEGER_MAX,
+  });
+  if (!quantityResult.ok) return quantityResult;
+
+  const plannedPurchaseYear = parseOptionalInteger(formData.get("planned_purchase_year"), {
+    label: "購入予定年",
+    min: 2000,
+    max: 2100,
+  });
+  if (!plannedPurchaseYear.ok) return plannedPurchaseYear;
+
+  const plannedPurchaseMonth = parseOptionalInteger(formData.get("planned_purchase_month"), {
+    label: "購入予定月",
+    min: 1,
+    max: 12,
+  });
+  if (!plannedPurchaseMonth.ok) return plannedPurchaseMonth;
+
+  const listPrice = parseOptionalInteger(formData.get("list_price"), {
+    label: "定価",
+    min: 0,
+    max: DECIMAL_10_0_MAX,
+  });
+  if (!listPrice.ok) return listPrice;
+
+  const purchasePrice = parseOptionalInteger(formData.get("purchase_price"), {
+    label: "購入予定価格",
+    min: 0,
+    max: DECIMAL_10_0_MAX,
+  });
+  if (!purchasePrice.ok) return purchasePrice;
+
+  const platformId = parseOptionalInteger(formData.get("platform_id"), {
+    label: "プラットフォーム",
+    min: 1,
+    max: INTEGER_MAX,
+  });
+  if (!platformId.ok) return platformId;
+
+  const serviceId = parseOptionalInteger(formData.get("service_id"), {
+    label: "配送サービス",
+    min: 1,
+    max: INTEGER_MAX,
+  });
+  if (!serviceId.ok) return serviceId;
+
+  const sizeId = parseOptionalInteger(formData.get("size_id"), {
+    label: "配送サイズ",
+    min: 1,
+    max: INTEGER_MAX,
+  });
+  if (!sizeId.ok) return sizeId;
+
+  const listingQuantity = parseOptionalInteger(formData.get("listing_quantity"), {
+    label: "出品数",
+    min: 1,
+    max: INTEGER_MAX,
+  });
+  if (!listingQuantity.ok) return listingQuantity;
+
+  const sellingPrice = parseOptionalInteger(formData.get("selling_price"), {
+    label: "売価",
+    min: 0,
+    max: DECIMAL_10_0_MAX,
+  });
+  if (!sellingPrice.ok) return sellingPrice;
+
+  const packagingCost = parseOptionalInteger(formData.get("packaging_cost"), {
+    label: "梱包材費",
+    min: 0,
+    max: DECIMAL_10_0_MAX,
+  });
+  if (!packagingCost.ok) return packagingCost;
+
+  const workTimeHours = parseOptionalDecimal(formData.get("work_time_hours"), {
+    label: "作業時間",
+    min: 0,
+    max: DECIMAL_8_2_MAX,
+    decimalPlaces: 2,
+    step: 0.25,
+  });
+  if (!workTimeHours.ok) return workTimeHours;
+
+  const laborRate = parseOptionalInteger(formData.get("labor_rate"), {
+    label: "時給",
+    min: 0,
+    max: DECIMAL_10_0_MAX,
+  });
+  if (!laborRate.ok) return laborRate;
+
   const statusRaw = String(formData.get("status") ?? "");
   const status = (STATUSES as string[]).includes(statusRaw) ? (statusRaw as ItemStatus) : "owned";
 
-  const category_ids = formData
-    .getAll("category_ids")
-    .map((v) => Number(v))
-    .filter((n) => Number.isFinite(n) && n > 0);
+  const category_ids: number[] = [];
+  for (const value of formData.getAll("category_ids")) {
+    const categoryId = parseRequiredInteger(value, {
+      label: "カテゴリ",
+      min: 1,
+      max: INTEGER_MAX,
+    });
+    if (!categoryId.ok) return categoryId;
+    category_ids.push(categoryId.value);
+  }
 
   const new_category_names = String(formData.get("new_category_names") ?? "")
     .split(/[,、]/)
     .map((s) => s.trim())
     .filter(Boolean);
 
-  const quantityRaw = nonNegIntOrNull(formData.get("quantity"));
-  const quantity = quantityRaw != null && quantityRaw > 0 ? quantityRaw : 1;
+  const quantity = quantityResult.value ?? 1;
 
   const file = formData.get("image");
   const image = file instanceof File && file.size > 0 ? file : null;
 
   return {
-    name: String(formData.get("name") ?? "").trim(),
-    status,
-    category_ids,
-    new_category_names,
-    jan_code: strOrNull(formData.get("jan_code")),
-    quantity,
-    notes: strOrNull(formData.get("notes")),
-    actual_price: nonNegIntOrNull(formData.get("actual_price")),
-    purchased_at: strOrNull(formData.get("purchased_at")),
-    image,
-    delete_image: String(formData.get("delete_image") ?? "") === "1",
-    plan: {
-      planned_purchase_year: intOrNull(formData.get("planned_purchase_year")),
-      planned_purchase_month: (() => {
-        const m = intOrNull(formData.get("planned_purchase_month"));
-        return m != null && m >= 1 && m <= 12 ? m : null;
-      })(),
-      list_price: nonNegIntOrNull(formData.get("list_price")),
-      purchase_price: nonNegIntOrNull(formData.get("purchase_price")),
-      product_url: strOrNull(formData.get("product_url")),
-      deal_period: strOrNull(formData.get("deal_period")),
-    },
-    listing: {
-      platform_id: intOrNull(formData.get("platform_id")),
-      service_id: intOrNull(formData.get("service_id")),
-      size_id: intOrNull(formData.get("size_id")),
-      quantity: nonNegIntOrNull(formData.get("listing_quantity")),
-      selling_price: nonNegIntOrNull(formData.get("selling_price")),
-      packaging_cost: nonNegIntOrNull(formData.get("packaging_cost")),
-      work_time_hours: (() => {
-        const v = formData.get("work_time_hours");
-        if (v == null) return null;
-        const s = String(v).trim();
-        if (s === "") return null;
-        const n = Number(s);
-        return Number.isFinite(n) && n >= 0 ? n : null;
-      })(),
-      labor_rate: nonNegIntOrNull(formData.get("labor_rate")),
+    ok: true,
+    value: {
+      name: String(formData.get("name") ?? "").trim(),
+      status,
+      category_ids,
+      new_category_names,
+      jan_code: strOrNull(formData.get("jan_code")),
+      quantity,
+      notes: strOrNull(formData.get("notes")),
+      actual_price: actualPrice.value,
+      purchased_at: strOrNull(formData.get("purchased_at")),
+      image,
+      delete_image: String(formData.get("delete_image") ?? "") === "1",
+      plan: {
+        planned_purchase_year: plannedPurchaseYear.value,
+        planned_purchase_month: plannedPurchaseMonth.value,
+        list_price: listPrice.value,
+        purchase_price: purchasePrice.value,
+        product_url: strOrNull(formData.get("product_url")),
+        deal_period: strOrNull(formData.get("deal_period")),
+      },
+      listing: {
+        platform_id: platformId.value,
+        service_id: serviceId.value,
+        size_id: sizeId.value,
+        quantity: listingQuantity.value,
+        selling_price: sellingPrice.value,
+        packaging_cost: packagingCost.value,
+        work_time_hours: workTimeHours.value,
+        labor_rate: laborRate.value,
+      },
     },
   };
 }
@@ -242,6 +335,17 @@ async function upsertListing(tx: Tx, itemId: number, parsed: ParsedForm) {
     shipping_fee,
     platform_fee_rate,
   });
+  const calculatedValues = [
+    calc.selling_fee,
+    calc.work_time_cost,
+    calc.operating_benefit,
+    calc.ordinary_profit,
+  ];
+  if (!calculatedValues.every(fitsSignedDecimal10)) {
+    throw new Error(
+      "入力値から算出される費用または利益が、保存可能な範囲を超えています。",
+    );
+  }
 
   const data = {
     shippingId,
@@ -277,7 +381,11 @@ function revalidateAll(itemId?: number) {
 }
 
 export async function createItem(formData: FormData) {
-  const parsed = parseForm(formData);
+  const parsedResult = parseForm(formData);
+  if (!parsedResult.ok) {
+    redirect(`/items/new?error=${encodeURIComponent(parsedResult.error)}`);
+  }
+  const parsed = parsedResult.value;
   if (!parsed.name) redirect("/items/new?error=name-required");
 
   const user = await authed();
@@ -321,7 +429,11 @@ export async function createItem(formData: FormData) {
 }
 
 export async function updateItem(itemId: number, formData: FormData) {
-  const parsed = parseForm(formData);
+  const parsedResult = parseForm(formData);
+  if (!parsedResult.ok) {
+    redirect(`/items/${itemId}/edit?error=${encodeURIComponent(parsedResult.error)}`);
+  }
+  const parsed = parsedResult.value;
   if (!parsed.name) redirect(`/items/${itemId}/edit?error=name-required`);
 
   const user = await authed();
@@ -335,6 +447,8 @@ export async function updateItem(itemId: number, formData: FormData) {
         select: { imageUrl: true },
       });
       const currentKey = existing?.imageUrl ?? null;
+
+      await upsertListing(tx, itemId, parsed);
 
       let nextImageUrl: string | null | undefined;
       if (parsed.delete_image && currentKey) {
@@ -362,7 +476,6 @@ export async function updateItem(itemId: number, formData: FormData) {
 
       await syncItemCategories(tx, itemId, categoryIds);
       await upsertPlan(tx, itemId, parsed);
-      await upsertListing(tx, itemId, parsed);
     });
   } catch (e) {
     redirect(`/items/${itemId}/edit?error=${encodeURIComponent((e as Error).message)}`);
