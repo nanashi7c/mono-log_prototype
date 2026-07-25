@@ -127,9 +127,12 @@ data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
 
+  # 標準版に固定。"al2023-ami-*" は minimal / ecs-hvm 版にも一致し、most_recent が apply 時点の
+  # 最新系統を引くため AMI 種別がブレる。minimal は SSM エージェント非同梱で send-command
+  # (migrate.ps1 / deploy) が使えなくなるので、SSM・aws-cli 同梱の標準版だけに絞る。
   filter {
     name   = "name"
-    values = ["al2023-ami-*-arm64"]
+    values = ["al2023-ami-2023.*-arm64"]
   }
   filter {
     name   = "virtualization-type"

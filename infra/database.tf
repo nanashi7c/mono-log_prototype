@@ -59,6 +59,10 @@ resource "aws_db_instance" "main" {
   engine_version = "16"           # メジャー16系（最新マイナーを自動選択）
   instance_class = "db.t4g.micro" # 最小クラス（ARM/Graviton・最安）
 
+  # スナップショット復元は一度きりの運用操作。DB名を直書きせず、復元時だけ
+  # apply に -var="db_snapshot_identifier=<snap名>" を渡す。通常時は null で復元しない。
+  snapshot_identifier = var.db_snapshot_identifier
+
   allocated_storage = 20 # GB単位（最小構成）
   storage_type      = "gp2"
   storage_encrypted = true # 保存時暗号化
@@ -81,6 +85,13 @@ resource "aws_db_instance" "main" {
 
   tags = {
     Name = "${var.project_name}-db"
+  }
+
+  # snapshot_identifier は一度きりの復元専用。通常運用で null との差分が出ても
+  # RDS を作り直さない（＝復元データを失わない）よう変更を無視する。
+  # 復元は意図的に `terraform apply -replace=aws_db_instance.main -var=...` で行う。
+  lifecycle {
+    ignore_changes = [snapshot_identifier]
   }
 }
 
