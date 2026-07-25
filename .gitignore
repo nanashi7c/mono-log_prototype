@@ -38,7 +38,18 @@ yarn-error.log*
 next-env.d.ts
 
 # claude
-.claude
+.claude/*
+!.claude/CLAUDE.md
+
+# 共通原本から生成する agent skills
+.agents/skills/
+
+# ローカル生成物・作業用
+docs/tmp/
+scripts/tmp/
+
+# OS
+Thumbs.db
 
 # supabase
 supabase/.temp
