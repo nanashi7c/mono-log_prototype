@@ -1,5 +1,11 @@
 .main {
   margin-inline: auto;
   max-width: 64rem;
-  padding: 1.5rem 1rem;
+  padding: 1rem 0.75rem;
+}
+
+@media (min-width: 640px) {
+  .main {
+    padding: 1.5rem 1rem;
+  }
 }
