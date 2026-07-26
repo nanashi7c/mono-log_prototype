@@ -4,12 +4,93 @@
 }
 
 .inner {
+  position: relative;
   margin-inline: auto;
   max-width: 64rem;
+  min-height: 4rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0.75rem 1rem;
+}
+
+.menuButton {
+  display: flex;
+  height: 2.5rem;
+  width: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.375rem;
+  color: var(--slate-700);
+}
+
+.menuButton:hover {
+  background-color: var(--slate-100);
+}
+
+.menuButton:focus-visible {
+  outline: 2px solid var(--brand-500);
+  outline-offset: 2px;
+}
+
+.menuIcon,
+.menuIcon::before,
+.menuIcon::after {
+  display: block;
+  width: 1.25rem;
+  height: 2px;
+  background-color: currentColor;
+  transition:
+    transform 150ms,
+    background-color 150ms;
+}
+
+.menuIcon {
+  position: relative;
+}
+
+.menuIcon::before,
+.menuIcon::after {
+  position: absolute;
+  content: "";
+}
+
+.menuIcon::before {
+  transform: translateY(-0.375rem);
+}
+
+.menuIcon::after {
+  transform: translateY(0.375rem);
+}
+
+.menuIconOpen {
+  background-color: transparent;
+}
+
+.menuIconOpen::before {
+  transform: rotate(45deg);
+}
+
+.menuIconOpen::after {
+  transform: rotate(-45deg);
+}
+
+.menuPanel {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  right: 1rem;
+  left: 1rem;
+  z-index: 10;
+  display: none;
+  border: 1px solid var(--slate-200);
+  border-radius: 0.5rem;
+  background-color: var(--white);
+  padding: 0.5rem;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 0.12);
+}
+
+.menuPanelOpen {
+  display: block;
 }
 
 .brand {
@@ -20,30 +101,37 @@
 
 .nav {
   display: flex;
-  align-items: center;
-  gap: 1rem;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.25rem;
   font-size: 0.875rem;
 }
 
 .navGuest {
   display: flex;
-  align-items: center;
-  gap: 0.75rem;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.25rem;
   font-size: 0.875rem;
 }
 
 .link {
+  display: block;
+  border-radius: 0.375rem;
+  padding: 0.625rem 0.75rem;
   color: var(--slate-600);
 }
 
 .link:hover {
+  background-color: var(--slate-50);
   color: var(--slate-900);
 }
 
 .cta {
+  display: block;
   border-radius: 0.375rem;
   background-color: var(--brand-500);
-  padding: 0.375rem 0.75rem;
+  padding: 0.625rem 0.75rem;
   color: var(--white);
 }
 
@@ -52,25 +140,100 @@
 }
 
 .email {
+  display: block;
+  overflow: hidden;
+  border-radius: 0.375rem;
+  padding: 0.625rem 0.75rem;
   color: var(--slate-400);
-  display: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .email:hover {
+  background-color: var(--slate-50);
   color: var(--slate-700);
   text-decoration: underline;
 }
 
-@media (min-width: 640px) {
-  .email {
-    display: inline;
-  }
-}
-
 .logout {
+  width: 100%;
+  border-radius: 0.375rem;
+  padding: 0.625rem 0.75rem;
+  text-align: left;
   color: var(--slate-500);
 }
 
 .logout:hover {
+  background-color: var(--slate-50);
   color: var(--slate-700);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (min-width: 640px) {
+  .menuButton {
+    display: none;
+  }
+
+  .menuPanel {
+    position: static;
+    display: block;
+    border: 0;
+    padding: 0;
+    box-shadow: none;
+  }
+
+  .nav,
+  .navGuest {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .nav {
+    gap: 0.5rem;
+  }
+
+  .navGuest {
+    gap: 0.75rem;
+  }
+
+  .email {
+    display: inline-block;
+    max-width: 6rem;
+  }
+
+  .link,
+  .email,
+  .logout {
+    width: auto;
+    padding: 0;
+  }
+
+  .link:hover,
+  .email:hover,
+  .logout:hover {
+    background-color: transparent;
+  }
+
+  .cta {
+    padding: 0.375rem 0.75rem;
+  }
+}
+
+@media (min-width: 900px) {
+  .nav {
+    gap: 1rem;
+  }
+
+  .email {
+    display: inline;
+    max-width: none;
+  }
 }
