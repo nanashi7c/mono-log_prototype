@@ -2,6 +2,22 @@
 
 所有物・購入予定・出品をまとめて管理するアプリ。Next.js (App Router) + React + TypeScript / Server Actions + REST API。バックエンドは **AWS ネイティブ**（Cognito 認証 / RDS PostgreSQL + Prisma + RLS / S3）。
 
+## 動作画面
+
+### ランディング画面
+
+![mono-logのランディング画面](docs/images/landing.png)
+
+### アイテム追加画面
+
+![アイテム追加画面](docs/images/item-create.png)
+
+### 追加後の所有物一覧
+
+![Raspberry Pi 5を追加した所有物一覧](docs/images/item-list.png)
+
+> アイテム画像: [Raspberry-Pi 5.jpg](https://commons.wikimedia.org/wiki/File:Raspberry-Pi_5.jpg)（CC0 1.0）
+
 ## 技術スタック
 
 | 領域 | 採用 |
@@ -13,6 +29,137 @@
 | 画像 | S3（非公開）＋ 署名付き URL |
 | API | 外部向け REST `/api/v1`（Cognito の Bearer トークン認証） |
 | ホスティング | EC2 + Docker + CloudFront。IaC は **Terraform**。ローカルは Docker の PostgreSQL |
+
+## データベース構成
+
+カラム名と型は、実際のPostgreSQL上の定義を表しています。詳細は [DBスキーマ設計](docs/db-design.md) を参照してください。
+
+```mermaid
+erDiagram
+    USERS {
+        uuid id PK
+        text email UK
+        text username
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    CATEGORIES {
+        integer id PK
+        uuid user_id FK "nullable"
+        text name
+        text color
+        boolean is_preset
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    ITEMS {
+        bigint id PK
+        uuid user_id FK
+        item_status status
+        varchar name
+        text image_url "nullable"
+        varchar jan_code "nullable"
+        integer quantity
+        text notes "nullable"
+        integer actual_price "nullable"
+        date purchased_at "nullable"
+        timestamptz deleted_at "nullable"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    ITEMS_CATEGORIES {
+        bigint item_id PK, FK
+        integer category_id PK, FK
+        timestamptz created_at
+    }
+
+    PLANS {
+        bigint id PK
+        bigint item_id FK, UK
+        smallint planned_purchase_year "nullable"
+        smallint planned_purchase_month "nullable"
+        numeric list_price "nullable"
+        numeric purchase_price "nullable"
+        text product_url "nullable"
+        varchar deal_period "nullable"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    LISTINGS {
+        bigint id PK
+        bigint item_id FK, UK
+        bigint shipping_id FK "nullable"
+        integer platform_id FK "nullable"
+        integer quantity "nullable"
+        numeric selling_price "nullable"
+        numeric packaging_cost "nullable"
+        numeric work_time_hours "nullable"
+        numeric labor_rate "nullable"
+        numeric selling_fee "nullable"
+        numeric work_time_cost "nullable"
+        numeric operating_benefit "nullable"
+        numeric ordinary_profit "nullable"
+        boolean is_listing "nullable"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    PLATFORMS {
+        integer id PK
+        text name UK
+        numeric fee_rate
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    SERVICES {
+        integer id PK
+        text shipping_service UK
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    SIZES {
+        integer id PK
+        text shipping_size UK
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    SHIPPING {
+        bigint id PK
+        integer shipping_service_id FK
+        integer shipping_size_id FK
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    SHIPPING_FEES {
+        bigint id PK
+        integer shipping_service_id FK
+        integer shipping_size_id FK
+        numeric fee
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    USERS o|--o{ CATEGORIES : owns
+    USERS ||--o{ ITEMS : owns
+    ITEMS ||--o{ ITEMS_CATEGORIES : categorized_by
+    CATEGORIES ||--o{ ITEMS_CATEGORIES : contains
+    ITEMS ||--o| PLANS : has
+    ITEMS ||--o| LISTINGS : has
+    PLATFORMS o|--o{ LISTINGS : used_by
+    SHIPPING o|--o{ LISTINGS : used_by
+    SERVICES ||--o{ SHIPPING : provides
+    SIZES ||--o{ SHIPPING : defines
+    SERVICES ||--o{ SHIPPING_FEES : prices
+    SIZES ||--o{ SHIPPING_FEES : prices
+```
 
 ## 機能
 
